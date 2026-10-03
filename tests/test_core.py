@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import unittest
 from pathlib import Path
 
@@ -267,6 +268,61 @@ class EvaluationDiscoveryTests(unittest.TestCase):
     def test_missing_dataset_is_an_error(self) -> None:
         with self.assertRaises(FileNotFoundError):
             discover_tasks(Path(__file__).resolve().parents[1] / "experiments" / "no_such_dataset")
+
+
+class DatasetValidatorTests(unittest.TestCase):
+    """tools/check_dataset.py is what a teammate runs after exporting a dataset."""
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(self.root / "tools"))
+        import check_dataset  # noqa: PLC0415
+
+        self.module = check_dataset
+
+    def test_finds_both_smoke_tasks(self) -> None:
+        dataset = self.root / "experiments" / "dataset_smoke"
+        self.assertEqual(self.module.task_stems(dataset), ["alu_comb", "counter"])
+
+    def test_accepts_the_bundled_dataset(self) -> None:
+        import subprocess  # noqa: PLC0415
+
+        completed = subprocess.run(
+            [sys.executable, str(self.root / "tools" / "check_dataset.py"), str(self.root / "experiments" / "dataset_smoke")],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("layout is valid", completed.stdout)
+
+    def test_strict_mode_fails_without_sidecar_testbenches(self) -> None:
+        import subprocess  # noqa: PLC0415
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "tools" / "check_dataset.py"),
+                str(self.root / "experiments" / "dataset_smoke"),
+                "--require-testbench",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("FAILED", completed.stdout)
+
+    def test_missing_directory_reports_an_error(self) -> None:
+        import subprocess  # noqa: PLC0415
+
+        completed = subprocess.run(
+            [sys.executable, str(self.root / "tools" / "check_dataset.py"), str(self.root / "no_such_dir")],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        self.assertEqual(completed.returncode, 2)
 
 
 class BaselinePromptTests(unittest.TestCase):

@@ -25,5 +25,10 @@ jobs:
         # Fails if a testbench or reference-answer path is hardcoded in agent/
         # again; that hardcoding is why only one task could be graded.
         run: python tools/check_architecture.py
+      - name: Dataset layout check
+        # The bundled smoke dataset must stay well-formed; strict mode is not
+        # used because one of its tasks intentionally relies on a generated
+        # self-check to exercise that code path.
+        run: python tools/check_dataset.py experiments/dataset_smoke
       - name: Unit tests
         run: python -m unittest discover -s tests -v
