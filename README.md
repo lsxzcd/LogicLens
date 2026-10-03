@@ -8,17 +8,19 @@ LogicLens 是一个面向 AMD FPGA 赛道 3.1（RTL/HLS 本地智能体设计赛
 
 ## 当前状态（先读这一节）
 
-**已跑通并验证：**
+**已跑通并验证（在目标器件 `xczu3eg-sbva484-1-e` 上用真实 Vivado 2025.2 实测）：**
 
-- 三级判定流程在 `xczu3eg-sbva484-1-e` 上真机跑通：`xvlog` → `xelab` → `xsim` → `synth_design`，
-  综合阶段带 5 ns 时钟约束（有 `clk` 端口时自动生成并读取 XDC）；
+- 三级判定流程真机跑通：`xvlog` → `xelab` → `xsim` → `synth_design`，
+  综合阶段带 5 ns 时钟约束，`experiments/p05_verify.py` 输出
+  **`3 cases, 0 failed assertion(s), 0 env-blocked`**；
 - 仿真失败会被正确识别（`TEST_PASS` + 无失败标记 + 未崩溃三重校验），
-  **仿真不过则不再进入综合**，符合赛题"逐级递进"口径；
+  **仿真不过则不再进入综合**（实测 `synthesis_attempted=0`），符合赛题"逐级递进"口径；
+- 组合逻辑题（无 `clk` 端口）不再丢失时序约束判定，记录为"适用"而非失败；
 - 测试台可插拔：`agent/testbench.py::resolve_testbench` 统一决定用哪个 testbench，
   支持显式指定 / sidecar 文件 / 自动生成，且生成的 counter testbench 已实测能
   **拒绝错误设计、接纳正确设计**；
 - 批量评测入口 `eval.py` 能产出 `results.csv`、`summary.json` 与 pass@k 增益表；
-- 单元测试 40 个全绿（不需要 Vivado）。
+- 单元测试 40 个全绿（不需要 Vivado），CI 在 GitHub 上自动执行。
 
 **尚未完成（不要当作已完成）：**
 

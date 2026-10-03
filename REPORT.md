@@ -120,7 +120,33 @@
 
 第三种用例是本轮门控修复的直接证据：仿真失败后综合不再执行，全部 8 项断言通过。
 
-> 已知环境限制：在 DSH 沙箱受限令牌下手动调用 Vivado 时，`tclapp::load_apps` 会失败，导致 `read_xdc` 与 `synth_design` 报 `ERROR: [Common 17-39]`，与设计无关。此时 `synthesis_error` 字段会记录该原始错误，`p05_verify.py` 会把它标记为 `ENV` 而非 `FAIL`。正常 PowerShell 会话下该路径工作正常（见 `retest_final_correct`）。
+> 已知环境限制：在 DSH 沙箱受限令牌下手动调用 Vivado 时，`tclapp::load_apps` 会失败，导致 `read_xdc` 与 `synth_design` 报 `ERROR: [Common 17-39]`，与设计无关。此时 `synthesis_error` 字段会记录该原始错误，`p05_verify.py` 会把它标记为 `ENV` 而非 `FAIL`。正常 PowerShell 会话下该路径工作正常（见下节）。
+
+### 8.2.1 全链路实测通过（目标器件、真实 Vivado 2025.2）
+
+在不受沙箱限制的普通 PowerShell 会话中，以目标器件 `xczu3eg-sbva484-1-e` 完整跑通
+`experiments/p05_verify.py`，结果为 **`3 cases, 0 failed assertion(s), 0 env-blocked`**：
+
+| 用例 | compile | elaborate | simulation | synthesis_attempted | synthesis | timing_constraint | clock_port |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `p05_clocked_ok` | 1 | 1 | 1 | 1 | **1** | **1** | `clk` |
+| `p05_comb_ok`（无时钟端口） | 1 | 1 | 1 | 1 | **1** | **1** | `""` |
+| `p05_clocked_wrong`（功能错误） | 1 | 1 | **0** | **0** | 0 | 0 | `clk` |
+
+三条关键结论由此被实证：
+
+1. **综合真的能跑通**，且 5 ns 时钟约束真的生效（`timing_constraint_pass=1`）；
+2. **组合逻辑题不再被误判**：`clock_port` 为空时约束判定记为"适用"，而不是因
+   `get_ports clk` 取空而失败——这正是 8.2 第 3 条修复的目标；
+3. **综合门控真的生效**：功能错误的设计 `simulation_pass=0` 之后 `synthesis_attempted=0`，
+   即"逐级递进"不仅写在代码里，而且在实际运行中成立。
+
+综合产物已落盘可核验：`timing.rpt`（18,783 字节）、`utilization.rpt`（8,694 字节）。
+单题墙钟约 56 秒。
+
+> 环境说明：此验证只能在装有 Vivado 的机器上进行。CI 覆盖的是不需要 Vivado 的部分
+> （单元测试、语法检查、架构守卫），因此"综合可综合"这一级的证据来自本机实测，
+> 复现命令即上述脚本。
 
 ### 8.3 接口抽取与工程化改造
 
