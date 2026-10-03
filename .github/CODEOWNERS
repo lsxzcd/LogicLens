@@ -1,0 +1,15 @@
+# 默认由仓库所有者评审所有改动。
+# 团队成员加入后，把 @lsxzcd 换成 @lsxzcd @队友用户名 即可。
+*       @lsxzcd
+
+# 判定口径相关：改动会影响所有历史实验数据的可比性，必须评审。
+/vivado/                @lsxzcd
+/agent/task_parser.py   @lsxzcd
+/agent/testbench.py     @lsxzcd
+/agent/evaluation.py    @lsxzcd
+
+# 交付物与文档
+/REPORT.md              @lsxzcd
+/model/MODEL.md         @lsxzcd
+/CONTRIBUTING.md        @lsxzcd
+/.github/               @lsxzcd
