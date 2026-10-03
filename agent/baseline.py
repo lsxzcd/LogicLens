@@ -42,9 +42,7 @@ def run_baseline(
     else:
         prompt = build_baseline_prompt(question)
         code = extract_verilog(ModelClient().generate(prompt))
-    rtl_path = run_dir / f"{contract.top_module}.v"
     shutil.copyfile(question_path, run_dir / "question.txt")
-    rtl_path.write_text(code, encoding="utf-8")
 
     spec = resolve_testbench(
         project_root,
@@ -59,8 +57,26 @@ def run_baseline(
     if tb_path.resolve() != persisted_tb.resolve():
         persisted_tb.write_text(tb_path.read_text(encoding="utf-8"), encoding="utf-8")
     tb_top = spec.top or contract.testbench_top
+    # A testbench that hardcodes the module it instantiates wins over the name
+    # derived from the task text, so the RTL file is named only after the
+    # testbench has been inspected.
+    dut_module = spec.dut_module or contract.top_module
+    reference_sources = [path for path in spec.extra_sources if path.is_file()]
+    rtl_path = run_dir / f"{dut_module}.v"
+    rtl_path.write_text(code, encoding="utf-8")
 
-    flow = run_vivado_flow(project_root, rtl_path, tb_path, tb_top, contract.top_module, run_dir, vivado, mock)
+    flow = run_vivado_flow(
+        project_root,
+        rtl_path,
+        tb_path,
+        tb_top,
+        dut_module,
+        run_dir,
+        vivado,
+        mock,
+        extra_sources=reference_sources,
+        relax_compile=spec.relax_compile,
+    )
     result = {
         "success": bool(
             flow.get("simulation_pass")
@@ -69,7 +85,15 @@ def run_baseline(
         ),
         "mode": "baseline",
         "contract": contract.to_dict(),
-        "testbench": {"top": tb_top, "source": spec.source, "behavior": spec.behavior, "notes": spec.notes},
+        "testbench": {
+            "top": tb_top,
+            "source": spec.source,
+            "behavior": spec.behavior,
+            "dut_module": dut_module,
+            "extra_sources": [str(p) for p in reference_sources],
+            "relax_compile": spec.relax_compile,
+            "notes": spec.notes,
+        },
         **flow,
     }
     (run_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

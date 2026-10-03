@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import sys
 import unittest
 from pathlib import Path
 
@@ -11,8 +13,14 @@ from agent.evaluation import discover_tasks, pass_at_k, summarize
 from agent.model_client import extract_verilog
 from agent.repair_policy import build_baseline_prompt, build_generation_prompt
 from agent.task_parser import parse_task, ports_from_rtl
-from agent.testbench import resolve_testbench
-from agent.vivado_runner import run_vivado_flow
+from agent.testbench import (
+    candidate_stems,
+    detect_dut_module,
+    detect_tb_module,
+    detect_verilogeval_pass_criterion,
+    resolve_testbench,
+)
+from agent.vivado_runner import locate_vitis, locate_vivado, run_vivado_flow, vivado_candidates
 
 
 class TaskParserTests(unittest.TestCase):
@@ -267,6 +275,146 @@ class EvaluationDiscoveryTests(unittest.TestCase):
     def test_missing_dataset_is_an_error(self) -> None:
         with self.assertRaises(FileNotFoundError):
             discover_tasks(Path(__file__).resolve().parents[1] / "experiments" / "no_such_dataset")
+
+
+class DatasetValidatorTests(unittest.TestCase):
+    """tools/check_dataset.py is what a teammate runs after exporting a dataset."""
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(self.root / "tools"))
+        import check_dataset  # noqa: PLC0415
+
+        self.module = check_dataset
+
+    def test_finds_both_smoke_tasks(self) -> None:
+        dataset = self.root / "experiments" / "dataset_smoke"
+        self.assertEqual(self.module.task_stems(dataset), ["alu_comb", "counter"])
+
+    def test_accepts_the_bundled_dataset(self) -> None:
+        import subprocess  # noqa: PLC0415
+
+        completed = subprocess.run(
+            [sys.executable, str(self.root / "tools" / "check_dataset.py"), str(self.root / "experiments" / "dataset_smoke")],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("layout is valid", completed.stdout)
+
+    def test_strict_mode_fails_without_sidecar_testbenches(self) -> None:
+        import subprocess  # noqa: PLC0415
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "tools" / "check_dataset.py"),
+                str(self.root / "experiments" / "dataset_smoke"),
+                "--require-testbench",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("FAILED", completed.stdout)
+
+    def test_missing_directory_reports_an_error(self) -> None:
+        import subprocess  # noqa: PLC0415
+
+        completed = subprocess.run(
+            [sys.executable, str(self.root / "tools" / "check_dataset.py"), str(self.root / "no_such_dir")],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        self.assertEqual(completed.returncode, 2)
+
+
+class VerilogEvalAdapterTests(unittest.TestCase):
+    """The VerilogEval sidecar convention is what makes 156 real testbenches usable.
+
+    Its shape differs from this project's own examples in four ways, each of
+    which broke the adapter during development: the prompt file is named
+    `<stem>_prompt.txt`, the testbench is `<stem>_test.sv` whose top module is
+    `tb`, it hardcodes the DUT name `TopModule`, and it needs a separate
+    reference file plus a relaxed analyzer.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1]
+        self.fixtures = self.root / "experiments" / "data" / "verilogeval" / "examples"
+        self.prompt = self.fixtures / "Prob001_zero_prompt.txt"
+        self.testbench = self.fixtures / "Prob001_zero_test.sv"
+        if not self.testbench.is_file():
+            self.skipTest("VerilogEval fixture not present; run tools/fetch_verilogeval_problem.py")
+        self.text = self.testbench.read_text(encoding="utf-8")
+
+    def test_prompt_stem_suffix_is_stripped_for_sidecars(self) -> None:
+        # The key bug: `<stem>_prompt.txt` would otherwise look for
+        # `Prob001_zero_prompt_test.sv`, which does not exist.
+        self.assertEqual(candidate_stems(self.prompt), ["Prob001_zero_prompt", "Prob001_zero"])
+
+    def test_sidecar_testbench_and_reference_are_found(self) -> None:
+        spec = resolve_testbench(self.root, self.prompt, parse_task(self.prompt.read_text(encoding="utf-8")))
+        self.assertEqual(spec.source, "sidecar")
+        self.assertEqual(spec.path.name, "Prob001_zero_test.sv")
+        self.assertEqual([p.name for p in spec.extra_sources], ["Prob001_zero_ref.sv"])
+
+    def test_dut_module_is_detected_despite_the_reference_coming_first(self) -> None:
+        # `RefModule good1` appears before `TopModule top_module1`; a search that
+        # stops at the first instantiation returns nothing.
+        self.assertEqual(detect_dut_module(self.text), "TopModule")
+
+    def test_testbench_top_is_the_module_instantiating_the_dut(self) -> None:
+        self.assertEqual(detect_tb_module(self.text), "tb")
+
+    def test_mismatch_criterion_is_recognised(self) -> None:
+        self.assertTrue(detect_verilogeval_pass_criterion(self.text))
+        # And not on an ordinary generated testbench.
+        self.assertFalse(detect_verilogeval_pass_criterion("module t; initial begin $display(\"TEST_PASS\"); end endmodule"))
+
+    def test_relaxed_compile_is_requested_for_this_testbench(self) -> None:
+        spec = resolve_testbench(self.root, self.prompt, parse_task(self.prompt.read_text(encoding="utf-8")))
+        self.assertTrue(spec.relax_compile)
+        self.assertEqual(spec.behavior, "reference-compare")
+        self.assertEqual(spec.dut_module, "TopModule")
+        self.assertEqual(spec.top, "tb")
+
+    def test_generated_testbench_does_not_request_relaxed_compile(self) -> None:
+        dataset = self.root / "experiments" / "dataset_smoke"
+        question = dataset / "counter.txt"
+        contract = parse_task(question.read_text(encoding="utf-8"))
+        rtl = (dataset / "counter.answer.v").read_text(encoding="utf-8")
+        spec = resolve_testbench(self.root, question, contract, rtl_text=rtl, mode="generated")
+        self.assertFalse(spec.relax_compile)
+        self.assertEqual(spec.extra_sources, [])
+
+
+class ToolchainResolutionTests(unittest.TestCase):
+    """Every teammate's install layout differs, so resolution must be layered.
+
+    These assert the mechanism (explicit wins, unknown hosts return None) rather
+    than a specific machine's paths, so they pass on CI runners with no EDA
+    tools installed at all.
+    """
+
+    def test_explicit_path_wins(self) -> None:
+        self.assertEqual(locate_vivado(r"C:\custom\vivado.bat"), r"C:\custom\vivado.bat")
+        self.assertEqual(locate_vitis(r"C:\custom\vitis.bat"), r"C:\custom\vitis.bat")
+
+    def test_resolution_survives_a_host_without_the_tools(self) -> None:
+        # Returns a path or None; it must never raise when nothing is installed.
+        result = locate_vivado(None)
+        self.assertTrue(result is None or isinstance(result, str))
+
+    def test_candidate_list_is_ordered_env_first(self) -> None:
+        os.environ["LOGICLENS_VIVADO"] = r"C:\from-env\vivado.bat"
+        try:
+            self.assertEqual(vivado_candidates()[0], r"C:\from-env\vivado.bat")
+        finally:
+            del os.environ["LOGICLENS_VIVADO"]
 
 
 class BaselinePromptTests(unittest.TestCase):

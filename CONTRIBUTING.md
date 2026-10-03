@@ -6,6 +6,8 @@
 
 ## 1. 环境准备
 
+**逐台机器的搭建步骤见 [docs/setup-zh.md](docs/setup-zh.md)**（Python、Vivado/Vitis 路径解析、代理、环境自检）。
+
 必须：
 
 - Python 3.11+（仅用标准库，见 `requirements.txt`）
@@ -17,7 +19,10 @@ Vivado 的解析顺序（无需修改代码即可适配各自机器）：
 1. `--vivado <path>` 显式传入
 2. 环境变量 `LOGICLENS_VIVADO`
 3. `PATH` 中的 `vivado`
-4. 内置候选路径（`D:\2025.2\Vivado\bin\vivado.bat` 等）
+4. 内置候选路径（`D:\2025.2\Vivado\bin\vivado.bat`、`C:\Xilinx\...`、`/tools/...` 等）
+
+Vitis 同理，环境变量为 `LOGICLENS_VITIS`。`xvlog` / `xelab` / `xsim` **不需要配置**：
+它们由 Vivado 批处理会话继承自己的 `bin` 目录后调用。
 
 接模型推理服务（OpenAI 兼容）：
 
