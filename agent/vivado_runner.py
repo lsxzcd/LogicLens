@@ -10,14 +10,42 @@ from pathlib import Path
 DEFAULT_TIMEOUT_SECONDS = 900
 
 # Last-resort locations, only consulted after PATH and the environment
-# override, so a contributor is not required to edit this list.
+# override. The D:\2025.2 form is how AMD's unified installer lays the tools
+# out; the C:\Xilinx and /tools forms cover standalone installs and containers.
 _FALLBACK_VIVADO_PATHS = (
     r"D:\2025.2\Vivado\bin\vivado.bat",
-    r"C:\Xilinx\Vivado\2025.2\bin\vivado.bat",
     r"D:\Xilinx\Vivado\2025.2\bin\vivado.bat",
+    r"C:\Xilinx\Vivado\2025.2\bin\vivado.bat",
+    r"C:\Program Files\Xilinx\Vivado\2025.2\bin\vivado.bat",
     "/tools/Xilinx/Vivado/2025.2/bin/vivado",
     "/opt/Xilinx/Vivado/2025.2/bin/vivado",
 )
+
+# Vitis ships alongside Vivado in the same installer. The HLS track needs it,
+# so its locations are resolved the same way.
+_FALLBACK_VITIS_PATHS = (
+    r"D:\2025.2\Vitis\bin\vitis.bat",
+    r"D:\Xilinx\Vitis\2025.2\bin\vitis.bat",
+    r"C:\Xilinx\Vitis\2025.2\bin\vitis.bat",
+    "/tools/Xilinx/Vitis/2025.2/bin/vitis",
+    "/opt/Xilinx/Vitis/2025.2/bin/vitis",
+)
+
+
+def _resolve(explicit: str | None, env_var: str, names: tuple[str, ...], fallbacks: tuple[str, ...]) -> str | None:
+    if explicit:
+        return explicit
+    env = os.getenv(env_var)
+    if env:
+        return env
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    for candidate in fallbacks:
+        if Path(candidate).is_file():
+            return candidate
+    return None
 
 
 def vivado_candidates(explicit: str | None = None) -> list[str]:
@@ -44,6 +72,11 @@ def locate_vivado(explicit: str | None = None) -> str | None:
         if shutil.which(candidate) or Path(candidate).is_file():
             return candidate
     return None
+
+
+def locate_vitis(explicit: str | None = None) -> str | None:
+    """Resolve the Vitis executable for the HLS track, or None when absent."""
+    return _resolve(explicit, "LOGICLENS_VITIS", ("vitis", "vitis.bat"), _FALLBACK_VITIS_PATHS)
 
 
 def _failure(reason: str, tool: str, elapsed: float, log: str = "") -> dict:

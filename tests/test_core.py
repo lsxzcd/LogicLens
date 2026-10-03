@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import unittest
@@ -19,7 +20,7 @@ from agent.testbench import (
     detect_verilogeval_pass_criterion,
     resolve_testbench,
 )
-from agent.vivado_runner import run_vivado_flow
+from agent.vivado_runner import locate_vitis, locate_vivado, run_vivado_flow, vivado_candidates
 
 
 class TaskParserTests(unittest.TestCase):
@@ -389,6 +390,31 @@ class VerilogEvalAdapterTests(unittest.TestCase):
         spec = resolve_testbench(self.root, question, contract, rtl_text=rtl, mode="generated")
         self.assertFalse(spec.relax_compile)
         self.assertEqual(spec.extra_sources, [])
+
+
+class ToolchainResolutionTests(unittest.TestCase):
+    """Every teammate's install layout differs, so resolution must be layered.
+
+    These assert the mechanism (explicit wins, unknown hosts return None) rather
+    than a specific machine's paths, so they pass on CI runners with no EDA
+    tools installed at all.
+    """
+
+    def test_explicit_path_wins(self) -> None:
+        self.assertEqual(locate_vivado(r"C:\custom\vivado.bat"), r"C:\custom\vivado.bat")
+        self.assertEqual(locate_vitis(r"C:\custom\vitis.bat"), r"C:\custom\vitis.bat")
+
+    def test_resolution_survives_a_host_without_the_tools(self) -> None:
+        # Returns a path or None; it must never raise when nothing is installed.
+        result = locate_vivado(None)
+        self.assertTrue(result is None or isinstance(result, str))
+
+    def test_candidate_list_is_ordered_env_first(self) -> None:
+        os.environ["LOGICLENS_VIVADO"] = r"C:\from-env\vivado.bat"
+        try:
+            self.assertEqual(vivado_candidates()[0], r"C:\from-env\vivado.bat")
+        finally:
+            del os.environ["LOGICLENS_VIVADO"]
 
 
 class BaselinePromptTests(unittest.TestCase):
