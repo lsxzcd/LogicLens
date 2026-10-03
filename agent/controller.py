@@ -72,13 +72,17 @@ class LogicLensAgent:
         if tb_path.resolve() != persisted_tb.resolve():
             persisted_tb.write_text(tb_path.read_text(encoding="utf-8"), encoding="utf-8")
         tb_top = spec.top or contract.testbench_top
+        # A testbench that hardcodes the module it instantiates wins over the
+        # name derived from the task text; otherwise elaboration cannot bind it.
+        dut_module = spec.dut_module or contract.top_module
+        reference_sources = [path for path in spec.extra_sources if path.is_file()]
 
         best = None
         best_score = (-1, -1, -999)
         for attempt in range(1, self.max_attempts + 1):
             attempt_dir = run_dir / f"attempt_{attempt}"
             attempt_dir.mkdir(parents=True, exist_ok=True)
-            rtl_path = attempt_dir / f"{contract.top_module}.v"
+            rtl_path = attempt_dir / f"{dut_module}.v"
             rtl_path.write_text(current_code, encoding="utf-8")
             shutil.copyfile(question_path, attempt_dir / "question.txt")
             flow = run_vivado_flow(
@@ -86,10 +90,12 @@ class LogicLensAgent:
                 rtl_path,
                 tb_path,
                 tb_top,
-                contract.top_module,
+                dut_module,
                 attempt_dir,
                 self.vivado,
                 self.mock,
+                extra_sources=reference_sources,
+                relax_compile=spec.relax_compile,
             )
             verified = bool(
                 flow.get("simulation_pass")
@@ -131,7 +137,15 @@ class LogicLensAgent:
             "mode": "mock" if self.mock else "agent",
             "source": source,
             "contract": contract.to_dict(),
-            "testbench": {"top": tb_top, "source": spec.source, "behavior": spec.behavior, "notes": spec.notes},
+            "testbench": {
+                "top": tb_top,
+                "source": spec.source,
+                "behavior": spec.behavior,
+                "dut_module": dut_module,
+                "extra_sources": [str(p) for p in reference_sources],
+                "relax_compile": spec.relax_compile,
+                "notes": spec.notes,
+            },
             "best_attempt": best.get("attempt"),
             "compile_pass": best.get("compile_pass", False),
             "elaborate_pass": best.get("elaborate_pass", False),

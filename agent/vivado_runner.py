@@ -71,6 +71,8 @@ def run_vivado_flow(
     vivado: str | None = None,
     mock: bool = False,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    extra_sources: list[Path] | None = None,
+    relax_compile: bool = False,
 ) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     if mock:
@@ -115,6 +117,18 @@ def run_vivado_flow(
         top,
         str(run_dir),
     ]
+    # Extra compile units (the reference implementation in VerilogEval-style
+    # suites) follow the five positional arguments.
+    for source in extra_sources or []:
+        command.append(str(source))
+    if relax_compile:
+        # Some published testbenches rely on a forward reference that only a
+        # lenient analyzer accepts (VerilogEval's `$dumpvars(..., tb_mismatch)`
+        # names a wire declared a few lines below). xvlog refuses it by default;
+        # --relax turns that error into a warning without changing what is
+        # compiled, but it is requested per testbench rather than applied to
+        # every design, so ordinary syntax errors still fail the compile stage.
+        command.append("--relax")
     start = time.perf_counter()
     timed_out = False
     try:

@@ -8,6 +8,22 @@ set tb_path [file normalize [lindex $argv 1]]
 set tb_top [lindex $argv 2]
 set top [lindex $argv 3]
 set run_dir [file normalize [lindex $argv 4]]
+
+# Additional compile units follow the five positional arguments. Suites such as
+# VerilogEval instantiate their reference model from a separate file, and
+# without it elaboration fails on an unknown module. A trailing --relax asks
+# xvlog to relax strict checking, which published testbenches sometimes need.
+set relax_compile 0
+set extra_sources {}
+foreach extra [lrange $argv 5 end] {
+    if {$extra eq "--relax"} {
+        set relax_compile 1
+        continue
+    }
+    if {$extra ne ""} {
+        lappend extra_sources [file normalize $extra]
+    }
+}
 set target_part "xczu3eg-sbva484-1-e"
 if {[info exists ::env(LOGICLENS_TARGET_PART)] && $::env(LOGICLENS_TARGET_PART) ne ""} {
     set target_part $::env(LOGICLENS_TARGET_PART)
@@ -42,6 +58,20 @@ proc append_log {name content} {
 # plain substring tests instead of regexes with shell-hostile quoting.
 proc normalize_ws {text} {
     return [regsub -all {\s+} $text " "]
+}
+
+# Build a JSON string from arbitrary file paths, escaping the characters JSON
+# requires. Emitting a Tcl list directly would produce invalid JSON.
+proc json_escape {text} {
+    return [string map {"\\" "/" "\"" "'" "\n" " " "\r" " "} $text]
+}
+
+proc json_string_array {items} {
+    set parts {}
+    foreach item $items {
+        lappend parts "\"[json_escape $item]\""
+    }
+    return "\[[join $parts {, }]\]"
 }
 
 # The competition fixes a 5 ns clock, but several spec-to-rtl tasks are purely
@@ -93,10 +123,22 @@ set synthesis_attempted 0
 set synthesis_error ""
 set sim_crashed 0
 set timing_constraint_pass 0
+set sim_mismatches ""
 
 cd $sim_dir
 set compile_log ""
-if {[catch {set compile_log [exec xvlog -sv $rtl_path $tb_path 2>@1]} err]} {
+# One xvlog invocation for every unit: the testbench, any reference model, and
+# the design under test last so a duplicate module name resolves to the DUT.
+set compile_units [list $tb_path]
+foreach extra $extra_sources {
+    lappend compile_units $extra
+}
+lappend compile_units $rtl_path
+set xvlog_args {-sv}
+if {$relax_compile} {
+    lappend xvlog_args --relax
+}
+if {[catch {set compile_log [exec xvlog {*}$xvlog_args {*}$compile_units 2>@1]} err]} {
     set compile_log "$compile_log\n$err"
 } else {
     set compile_pass 1
@@ -126,13 +168,26 @@ if {$compile_pass} {
     append_log [file join $run_dir elaboration.pass] $elaborate_pass
     set sim_log $xsim_log
 
-    # Automated testbenches signal success with TEST_PASS. A design must never
-    # be credited for simulation it did not reach, and a bare "error" substring
-    # must not decide the outcome: a correct design may legitimately print that
-    # word. Only the unambiguous simulator failure markers are treated as a
-    # failure signal here.
-    if {!$sim_crashed && [string first "test_pass" [string tolower $sim_log]] >= 0 &&
-        ![regexp -nocase {(?:^|\s)(?:ERROR:|Fatal:)} $sim_log]} {
+    # Automated testbenches signal success in one of two ways:
+    #  - a TEST_PASS marker (the testbenches this project generates);
+    #  - VerilogEval's reference comparison, whose verdict is the
+    #    "Mismatches: N in M samples" line its final block prints, where
+    #    passing means N == 0.
+    # A design must never be credited for simulation it did not reach, and a
+    # bare "error" substring must not decide the outcome: a correct design may
+    # legitimately print that word. Only unambiguous failure markers count.
+    set sim_lower [string tolower $sim_log]
+    set verilogeval_verdict 0
+    if {[regexp -line {Mismatches:[ \t]+([0-9]+)[ \t]+in[ \t]+[0-9]+[ \t]+samples} $sim_log -> mismatch_count]} {
+        set sim_mismatches $mismatch_count
+        if {$mismatch_count == 0} {
+            set verilogeval_verdict 1
+        }
+    }
+    set test_pass_marker [string first "test_pass" $sim_lower]
+    set failure_marker [regexp -nocase {(?:^|\s)(?:ERROR:|Fatal:)} $sim_log]
+    if {!$sim_crashed && !$failure_marker &&
+        ($test_pass_marker >= 0 || $verilogeval_verdict)} {
         set simulation_pass 1
     }
 }
@@ -181,6 +236,7 @@ if {$compile_pass && $simulation_pass} {
 append_log [file join $run_dir synthesis.log] $synth_log
 append_log [file join $run_dir synthesis.pass] $synthesis_pass
 
-set summary "{\n  \"compile_pass\": $compile_pass,\n  \"elaborate_pass\": $elaborate_pass,\n  \"simulation_pass\": $simulation_pass,\n  \"sim_crashed\": $sim_crashed,\n  \"synthesis_attempted\": $synthesis_attempted,\n  \"synthesis_pass\": $synthesis_pass,\n  \"synthesis_error\": \"$synthesis_error\",\n  \"timing_constraint_pass\": $timing_constraint_pass,\n  \"clock_port\": \"$clk_port\",\n  \"target_part\": \"$target_part\",\n  \"clock_period_ns\": 5.0,\n  \"timing_constraint_file\": \"logiclens_clock.xdc\",\n  \"tool\": \"vivado\"\n}"
+set compile_units_json [json_string_array $compile_units]
+set summary "{\n  \"compile_pass\": $compile_pass,\n  \"elaborate_pass\": $elaborate_pass,\n  \"simulation_pass\": $simulation_pass,\n  \"sim_crashed\": $sim_crashed,\n  \"sim_mismatches\": \"$sim_mismatches\",\n  \"synthesis_attempted\": $synthesis_attempted,\n  \"synthesis_pass\": $synthesis_pass,\n  \"synthesis_error\": \"$synthesis_error\",\n  \"timing_constraint_pass\": $timing_constraint_pass,\n  \"clock_port\": \"$clk_port\",\n  \"relax_compile\": $relax_compile,\n  \"compile_units\": $compile_units_json,\n  \"target_part\": \"$target_part\",\n  \"clock_period_ns\": 5.0,\n  \"timing_constraint_file\": \"logiclens_clock.xdc\",\n  \"tool\": \"vivado\"\n}"
 append_log [file join $run_dir flow_result.json] $summary
 exit 0
