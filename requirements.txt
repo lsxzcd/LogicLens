@@ -1,0 +1,3 @@
+# LogicLens MVP 只使用 Python 标准库。
+# 后续接入 transformers、vLLM 或 ROCm 时，再根据实际推理后端补充依赖。
+

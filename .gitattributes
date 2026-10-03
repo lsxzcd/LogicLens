@@ -1,0 +1,27 @@
+# Normalize line endings so a Windows contributor and a Linux container see the
+# same bytes. Shell scripts must stay LF or they fail inside the Linux base
+# image with "bad interpreter".
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.py text eol=lf
+*.tcl text eol=lf
+*.v text eol=lf
+*.sv text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+
+# Windows-only helpers keep their native endings.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary artifacts must never be line-ending converted.
+*.dmp binary
+*.wdb binary
+*.pb binary
+*.png binary
+*.jpg binary
+*.pdf binary

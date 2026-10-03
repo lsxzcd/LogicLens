@@ -1,0 +1,55 @@
+{
+  "syntax": [
+    "syntax error",
+    "unexpected token",
+    "parse error",
+    "near \"endmodule\""
+  ],
+  "width_mismatch": [
+    "width mismatch",
+    "port width",
+    "truncated",
+    "位宽"
+  ],
+  "multiple_driver": [
+    "multiple drivers",
+    "driven by more than one",
+    "multiple driving"
+  ],
+  "latch": [
+    "latch inferred",
+    "incomplete assignment",
+    "not assigned in every branch"
+  ],
+  "reset_semantics": [
+    "reset asserted",
+    "reset deasserted",
+    "reset polarity",
+    "active-low reset",
+    "active-high reset",
+    "rst_n polarity",
+    "rst polarity",
+    "reset mismatch",
+    "reset semantic"
+  ],
+  "simulation_mismatch": [
+    "$fatal",
+    "fatal:",
+    "test failed",
+    "mismatch",
+    "assertion failed"
+  ],
+  "synthesis": [
+    "cannot synthesize",
+    "not synthesizable",
+    "synth_design failed"
+  ],
+  "timing": [
+    "timing violation",
+    "setup violation",
+    "hold violation",
+    "unconstrained path",
+    "no clocks found",
+    "clock not found"
+  ]
+}

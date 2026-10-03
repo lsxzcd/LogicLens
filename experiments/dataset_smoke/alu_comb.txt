@@ -1,0 +1,7 @@
+Implement a purely combinational 8-bit adder/subtractor.
+
+Requirements:
+1. inputs: a and b are 8-bit unsigned values;
+2. input sub selects the operation: 0 adds, 1 subtracts;
+3. output y is 8 bits wide and is combinational (no clock);
+4. top-level module name is alu_comb.

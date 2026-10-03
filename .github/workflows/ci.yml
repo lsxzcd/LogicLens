@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  tests:
+    # The unit suite uses only the Python standard library and needs no Vivado,
+    # so it runs on any small runner.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Syntax-check every module
+        run: python -m compileall -q agent ui tools run.py run_baseline.py eval.py experiments/p05_verify.py experiments/tb_verify.py experiments/pipeline_verify.py
+      - name: Architecture guard
+        # Fails if a testbench or reference-answer path is hardcoded in agent/
+        # again; that hardcoding is why only one task could be graded.
+        run: python tools/check_architecture.py
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v

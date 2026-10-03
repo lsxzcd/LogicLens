@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pylibs/
+.tmp/
+# Run artifacts. Keep experiments/dataset_*/ and experiments/*.py: those are
+# fixtures and verification scripts the team shares.
+experiments/runs/
+experiments/results/
+*.jou
+*.log
+*.str
+*.wdb
+*.pb
+.Xil/
+xsim.dir/
+# Written by Vivado into whatever directory it starts in, and by the DFX
+# profiler; it is tool noise, not project output.
+dfx_runtime.txt
+hs_err_pid*.dmp
+hs_err_pid*.log
+
