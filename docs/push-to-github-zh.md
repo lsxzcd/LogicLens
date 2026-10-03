@@ -1,125 +1,94 @@
-# 首次推送到 GitHub（网络受限环境）
+# 首次推送到 GitHub（需要走本地代理）
 
-本机实测情况：
+## 本机实测结论
 
-- `github.com:443` **直连失败**（`Connection was reset`）
-- 系统代理已配置为 `127.0.0.1:7897`，但**代理客户端没有运行**（该端口无监听）
-- git **没有配置代理**，所以 `git push` 走的是直连，必然失败
+| 检查项 | 实测结果 |
+|---|---|
+| 系统代理配置 | `127.0.0.1:7897`（Clash Verge 默认端口） |
+| 代理客户端 | **正在运行**（7897 有大量活跃连接） |
+| git 代理配置 | **未配置** |
+| 直连 `github.com:443` | **失败**（`Connection was reset`） |
 
-结论：**先启动代理客户端，再让 git 走代理**。
+**根因**：git **不读取 Windows 系统代理**。浏览器能上 GitHub 是因为浏览器走系统代理，
+而 `git push` 走的是直连，于是被重置。
 
----
+**结论：只要把代理显式告诉 git 即可。代理本身没问题，不用换平台。**
 
-## 步骤 1：启动代理客户端
-
-打开你的代理软件（Clash Verge / v2rayN / 其它），开启系统代理。
-
-确认端口在监听（在 PowerShell 里执行，能看到"在监听"即可）：
-
-```powershell
-Get-NetTCPConnection -State Listen -LocalPort 7897 -ErrorAction SilentlyContinue
-```
-
-> 如果你的客户端端口不是 7897，请在后面的命令里换成实际端口。
-> 常见端口：Clash 7890 / 7897，v2rayN 10809，其它 1080、2080。
-
-**验证代理确实能到 GitHub**（这条通过再往下做）：
-
-```powershell
-curl.exe -sS -o NUL -w "%{http_code}\n" --max-time 20 https://github.com
-```
-
-期望输出 `200` 或 `301`。若仍是失败，说明代理没生效，先解决代理再继续。
+> 说明：最初误判为"代理没运行"，是因为排查命令被 DSH 沙箱限制了端口/进程查询，
+> 给出了错误结论。以 `netstat` 的结果为准。
 
 ---
 
-## 步骤 2：让 git 走代理
+## 最省事：双击 `push-to-github.bat`
 
-在 **cmd** 里执行（把 `7897` 换成你的实际端口）：
+脚本会依次完成：
+
+1. 自动找到 git（GitHub Desktop 自带的那个，不需要 PATH）
+2. **检查 7897 端口是否有监听**；没有就停下来提示你启动代理
+3. 把 `http.proxy` / `https.proxy` 写入 git 全局配置
+4. 配好 `origin`
+5. 执行 `git push -u origin main`
+
+成功会打印 `[OK] Pushed to GitHub successfully.`
+
+---
+
+## 手动版（等价操作）
+
+在 **cmd** 里逐行执行：
 
 ```cmd
 D:
 cd \FPGA
 set PATH=%LOCALAPPDATA%\GitHubDesktop\app-3.5.2\resources\app\git\cmd;%PATH%
 
-git config --global http.proxy http://127.0.0.1:7897
+rem 1) 确认代理在监听（有输出即可）
+netstat -ano | findstr ":7897 " | findstr LISTENING
+
+rem 2) 让 git 走代理
+git config --global http.proxy  http://127.0.0.1:7897
 git config --global https.proxy http://127.0.0.1:7897
 git config --global core.pager cat
-```
 
-- 前两条让 git 走代理（`https.proxy` 在你的 git 版本里是关键的那条）。
-- 第三条顺手修掉截图里的 `cannot spawn less`：GitHub Desktop 自带的 git 没打包分页器。
-  这条报错**无害**，只影响 `git log` 的翻页显示。
-
----
-
-## 步骤 3：重新推送
-
-远程已经配好了（上次已显示 `Added remote origin.`），所以直接推：
-
-```cmd
+rem 3) 推送
 git push -u origin main
 ```
 
-看到类似下面的输出就是成功了：
-
-```
-Writing objects: 100% ...
-To https://github.com/LSXZCD/LogicLens.git
- * [new branch]      main -> main
-branch 'main' set up to track 'origin/main'.
-```
+`core.pager cat` 只是顺手修掉 `cannot spawn less`——GitHub Desktop 自带的 git
+没有打包分页器，那条报错本身无害。
 
 ---
 
-## 验证
+## 验证成功
 
 ```cmd
-git log --oneline -1
 git branch -vv
 ```
 
-`git branch -vv` 应显示 `main ... [origin/main]`。
-浏览器刷新仓库页面，应看到 53 个文件、7 个提交。
+应显示 `main ... [origin/main]`。刷新仓库页面应看到 55 个文件、8 个提交。
 
 ---
 
-## 如果代理方案走不通
+## 排查顺序
 
-### 方案 B：改用 Gitee（国内，无需代理）
+| 现象 | 处理 |
+|---|---|
+| `Nothing is listening on port 7897` | 启动代理客户端并开启系统代理；若端口不同，改 `push-to-github.bat` 顶部的 `PROXY_PORT` |
+| 仍是 `Connection was reset` | 代理可能只暴露 SOCKS 端口 → 把 `PROXY_SCHEME` 改成 `socks5` 并填对应端口 |
+| 卡住不动超过 1 分钟 | 按 `Ctrl+C` 中断，多半是认证被卡；改用 Personal Access Token |
+| 提示 `non-fast-forward` | 远程仓库不是空的（建仓时勾了 README）→ 需要先 `git fetch` 再决定合并或强推 |
+| 问用户名/密码 | 用户名填 GitHub 用户名，**密码填 Personal Access Token**，不是登录密码 |
 
-1. 在 https://gitee.com 建一个空仓库（同样**不要**勾选初始化 README/.gitignore）
-2. 改远程地址并推送：
-
-```cmd
-git remote set-url origin https://gitee.com/<你的Gitee用户名>/LogicLens.git
-git push -u origin main
-```
-
-之后队友从 Gitee 克隆。**代价**：CI 不能用了（`.github/workflows/` 是 GitHub 专用），
-需要改成 Gitee Go 或本地跑测试；其它功能不受影响。
-
-### 方案 C：SSH 方式
-
-若代理只支持 SOCKS5，可以给 git 单独指定：
-
-```cmd
-git config --global http.proxy socks5://127.0.0.1:7897
-git config --global https.proxy socks5://127.0.0.1:7897
-```
+**Personal Access Token 生成**：GitHub 头像 → Settings → Developer settings →
+Personal access tokens → Tokens (classic) → Generate new token → 勾选 `repo`。
 
 ---
 
-## 出问题时的排查顺序
-
-1. 代理客户端在运行，且系统代理已开启？
-2. `curl.exe` 能拿到 github.com 的 200/301 吗？
-3. `git config --global --get https.proxy` 有输出吗？
-4. 三条都正常仍失败 → 把 `git push` 的完整输出发出来。
-
-排查完不需要时，可以清掉代理配置：
+## 用完想清掉代理配置
 
 ```cmd
 git config --global --unset http.proxy
 git config --global --unset https.proxy
 ```
+
+换到不需要代理的网络时执行即可，不影响已完成的推送。
