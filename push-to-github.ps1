@@ -34,7 +34,7 @@ if (-not (Test-Path ".git")) {
     exit 1
 }
 
-$remoteUrl = "https://github.com/LSXZCD/LogicLens.git"
+$remoteUrl = "https://github.com/lsxzcd/LogicLens.git"
 Write-Host "Repo       : $PWD"
 Write-Host "Remote URL : $remoteUrl"
 Write-Host ""

@@ -60,7 +60,7 @@ rem GitHub Desktop ships a minimal git without the 'less' pager.
 "%GIT%" config --global core.pager cat
 echo.
 
-set "REMOTE_URL=https://github.com/LSXZCD/LogicLens.git"
+set "REMOTE_URL=https://github.com/lsxzcd/LogicLens.git"
 "%GIT%" remote get-url origin >nul 2>&1
 if errorlevel 1 (
     "%GIT%" remote add origin "%REMOTE_URL%"
