@@ -95,6 +95,10 @@ class TaskContract:
     reset_spec: ResetSpec = field(default_factory=ResetSpec)
     boundaries: list[str] = field(default_factory=list)
     testbench: TestbenchContract = field(default_factory=TestbenchContract)
+    # True when no module name could be derived from the text. Callers that
+    # know the naming convention of their dataset can substitute their own
+    # default instead of accepting `top_module`'s placeholder.
+    top_module_is_default: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -171,8 +175,11 @@ def _parse_top_module(text: str) -> str | None:
     return _find_first_identifier(
         (
             # "top-level module name is X" names the module explicitly, so it is
-            # checked before the Chinese prose forms.
-            r"(?:top(?:-level)?\s+module)\s*(?:name\s*)?(?:is\s*|:\s*)?[`\"']?([A-Za-z_]\w*)",
+            # checked before the Chinese prose forms. The lookahead is required:
+            # without it, a prompt saying "consider a top-level module with the
+            # following interface" (which names no module) matches on "with".
+            r"(?:top(?:-level)?\s+module)\s*(?:name\s*)?(?:is\s*|:\s*)?"
+            r"(?!with\b|where\b|that\b|which\b|and\b|the\b|has\b|contains\b)[`\"']?([A-Za-z_]\w*)",
             r"(?:顶层模块|顶层)(?:名称|名字|名)?\s*[为是:：]?\s*([A-Za-z_]\w*)",
             r"模块(?:名称|名字|名)?\s*[为是:：]\s*([A-Za-z_]\w*)",
             r"模块\s+([A-Za-z_]\w*)\s*(?:的|中|里)",
@@ -287,17 +294,17 @@ def _parse_width_from_text(text: str, start: int, end: int, default: int, allow_
         clause_break = max(behind.rfind(separator) for separator in (",", "，", "；", ";", "\n", "。"))
         if clause_break >= 0:
             behind = behind[clause_break + 1 :]
-        match = re.search(r"\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*$", behind)
+        match = re.search(r"\[\s*\d+\s*:\s*\d+\s*\]\s*$", behind)
         if match:
-            return max(int(match.group(1)), int(match.group(2))) + 1
+            return width_from_bracket(match.group(0)) or 1
         match = re.search(r"(\d+)\s*(?:位|bit|bits|-bit)\s*$", behind, re.I)
         if match:
             return int(match.group(1))
 
     forward = text[start:end]
-    match = re.search(r"\[\s*(\d+)\s*:\s*(\d+)\s*\]", forward)
+    match = re.search(r"\[\s*\d+\s*:\s*\d+\s*\]", forward)
     if match:
-        return max(int(match.group(1)), int(match.group(2))) + 1
+        return width_from_bracket(match.group(0)) or 1
 
     # A width stated after the name must be adjacent to it, so "output count,
     # width 8 bits" resolves while a later port's width does not.
@@ -335,7 +342,7 @@ def ports_from_structured_text(text: str) -> list[PortSpec]:
         if name.lower() in _KNOWN_DIRECTIONS or name.lower() in _WORD_STOPLIST or name in seen:
             continue
         seen.add(name)
-        width = max(int(x) for x in re.findall(r"\d+", match.group("width"))) + 1
+        width = width_from_bracket(match.group("width")) or 1
         ports.append(
             PortSpec(
                 name=name,
@@ -361,7 +368,7 @@ def ports_from_keyword_declarations(text: str) -> list[PortSpec]:
             continue
         seen.add(name)
         if match.group("width"):
-            width = max(int(x) for x in re.findall(r"\d+", match.group("width"))) + 1
+            width = width_from_bracket(match.group("width")) or 1
         else:
             # Stop before the next direction keyword: a width stated there
             # belongs to that declaration, not to this one.
@@ -397,7 +404,7 @@ def ports_from_declaration_list(declaration_text: str) -> list[PortSpec]:
                 seen.add(name)
                 width = 1
                 if match.group("width"):
-                    width = max(int(x) for x in re.findall(r"\d+", match.group("width"))) + 1
+                    width = width_from_bracket(match.group("width")) or 1
                 ports.append(
                     PortSpec(
                         name=name,
@@ -432,6 +439,38 @@ def _split_top_level_commas(text: str) -> list[str]:
 
 _DIRECTION_WORDS = frozenset({"input", "inputs", "output", "outputs", "inout"})
 
+# The VerilogEval suite states its interface as a hyphen bullet list:
+#
+#     - input  vec  (3 bits)
+#     - output outv (3 bits)
+#
+# This is the primary interface carrier for that dataset, so it is parsed as a
+# first-class form rather than left to the looser prose heuristics.
+_BULLET_PORT_RE = re.compile(
+    r"^[ \t]*[-*][ \t]*(?P<dir>input|output|inout)\b[ \t]*"
+    r"(?P<type>wire|reg|logic|bit)?[ \t]*"
+    r"(?P<name>[A-Za-z_]\w*)[ \t]*"
+    r"(?P<width>\([^)]*\)|\[[^\]]*\])?",
+    re.I | re.M,
+)
+
+# Some prompts state the interface as a Verilog snippet instead of a bullet
+# list, e.g. "bug fixing" tasks that show the module to repair. The header
+# inside that snippet is authoritative. Two spellings occur upstream: a fenced
+# code block, and a plainly indented snippet (the HDLBits-derived prompts use
+# the indented form).
+_CODE_BLOCK_RES = (
+    re.compile(r"```[a-zA-Z]*\s*\n(?P<body>.*?)```", re.S),
+    re.compile(r"(?P<body>(?:^[ \t]{2,}\S.*\n)+)", re.M),
+)
+_MODULE_HEADER_RE = re.compile(
+    r"\bmodule\s+(?P<name>[A-Za-z_]\w*)\s*(?:#\s*\([^)]*\)\s*)?\((?P<ports>[^;]*?)\)\s*;",
+    re.S,
+)
+
+# Module names that appear in prompts as context rather than as the deliverable.
+_HELPER_MODULE_NAMES = frozenset({"full_module", "refmodule", "reference_module"})
+
 _WORD_STOPLIST = frozenset(
     {
         "port",
@@ -463,7 +502,33 @@ _WORD_STOPLIST = frozenset(
         "logic",
         "signed",
         "unsigned",
+        "that",
+        "this",
+        "to",
+        "from",
+        "should",
+        "value",
+        "values",
+        "vector",
+        "computes",
+        "connected",
+        "changes",
+        "changed",
+        "go",
+        "half",
+        "combinationally",
+        "given",
+        "following",
+        "implement",
+        "implementing",
     }
+)
+
+# Words that must not be treated as a port name only when no direction
+# accompanies them. A port may legitimately be called `a` or `in`, so these are
+# applied to the sentence heuristics and never to an explicit `- input a`.
+_PROSE_ONLY_STOPLIST = frozenset(
+    {"a", "an", "in", "out", "up", "on", "at", "it", "as", "do", "so", "no", "not"}
 )
 
 _WIDTH_PHRASE_RE = re.compile(r"\(?\s*(?:width|位宽|宽度)?\s*=?\s*\d+\s*(?:位|bit|bits|-bit)\s*\)?", re.I)
@@ -511,6 +576,65 @@ def _read_prose_name_list(after: str, seen: set[str]) -> tuple[list[tuple[str, i
         pending_width = 1
         position = word_match.end()
     return names, None
+
+
+def ports_from_bullet_list(text: str) -> list[PortSpec]:
+    """Parse a hyphen bullet interface, as used by the VerilogEval prompts.
+
+    An explicit direction makes the name a port, so no stoplist applies here: a
+    port really may be called `a`, `in` or `out`.
+    """
+    ports: list[PortSpec] = []
+    seen: set[str] = set()
+    for match in _BULLET_PORT_RE.finditer(text):
+        name = match.group("name")
+        if name.lower() in _KNOWN_DIRECTIONS or name in seen:
+            continue
+        seen.add(name)
+        ports.append(
+            PortSpec(
+                name=name,
+                direction=match.group("dir").lower(),
+                width=_width_from_annotation(match.group("width")),
+            )
+        )
+    return ports
+
+
+def width_from_bracket(annotation: str | None) -> int | None:
+    """Width of a `[high:low]` range, or None when there is no range.
+
+    The width is |high - low| + 1, not max + 1: both `[7:0]` and `[0:7]` are
+    eight bits, and a real upstream task declares `output [3:1] ena`, which is
+    three bits. Using max+1 would silently report one bit too many for any
+    range that does not start at zero.
+    """
+    if not annotation or not annotation.strip().startswith("["):
+        return None
+    numbers = re.findall(r"-?\d+", annotation)
+    if len(numbers) < 2:
+        if len(numbers) == 1:
+            return int(numbers[0]) + 1
+        return None
+    high, low = int(numbers[0]), int(numbers[1])
+    return abs(high - low) + 1
+
+
+def _width_from_annotation(annotation: str | None) -> int:
+    """Read a width from `(3 bits)`, `[7:0]`, `[3:1]` or `(8 bits each)`.
+
+    The VerilogEval prompts annotate every multi-bit port this way and omit the
+    annotation for 1-bit ports, so an absent annotation means one bit.
+    """
+    if not annotation:
+        return 1
+    bracket = width_from_bracket(annotation)
+    if bracket is not None:
+        return bracket
+    match = re.search(r"(\d+)\s*(?:bits?|位)", annotation, re.I)
+    if match:
+        return int(match.group(1))
+    return 1
 
 
 def ports_from_prose_list(text: str) -> list[PortSpec]:
@@ -625,7 +749,8 @@ def parse_task(text: str) -> TaskContract:
     which values were actually derived from the task text.
     """
     lowered = text.lower()
-    top = _parse_top_module(text) or "counter"
+    parsed_top = _parse_top_module(text)
+    top = parsed_top or "counter"
     tb_top = _find_first_identifier(
         (
             r"(?:测试台|testbench|tb)(?:模块)?(?:名称|名字|名)?\s*[为是:：]?\s*([A-Za-z_]\w*)",
@@ -637,7 +762,21 @@ def parse_task(text: str) -> TaskContract:
     clock_spec = _parse_clock(text, lowered)
     reset_spec = _parse_reset(text, lowered)
 
-    ports = ports_from_structured_text(text)
+    ports = ports_from_bullet_list(text)
+    # A bullet list is the authoritative interface statement. A code block in
+    # the same prompt is often context rather than the interface: one upstream
+    # task states the interface as bullets and then shows a `full_module`
+    # helper it explicitly says the solver need not produce. Only fall through
+    # to the snippet when no bullet list exists.
+    if not ports:
+        block_module, block_ports = ports_from_code_block(text)
+        if block_ports:
+            ports = block_ports
+            if block_module and block_module.lower() not in _HELPER_MODULE_NAMES:
+                top = block_module
+                tb_top = f"{block_module}_tb"
+    if not ports:
+        ports = ports_from_structured_text(text)
     if not ports:
         ports = ports_from_prose_list(text)
     if not ports:
@@ -658,6 +797,7 @@ def parse_task(text: str) -> TaskContract:
         reset_spec=reset_spec,
         boundaries=parse_boundaries(text),
         testbench=_parse_testbench(text),
+        top_module_is_default=parsed_top is None,
     )
 
 
@@ -673,6 +813,23 @@ def _parse_testbench(text: str) -> TestbenchContract:
     if tb_top:
         return TestbenchContract(top=tb_top, source="text")
     return TestbenchContract()
+
+
+def ports_from_code_block(text: str) -> tuple[str, list[PortSpec]]:
+    """Parse an interface shown as a Verilog module header in a snippet.
+
+    Returns (module_name, ports); both empty when no such snippet exists.
+    """
+    for pattern in _CODE_BLOCK_RES:
+        for block in pattern.finditer(text):
+            header = _MODULE_HEADER_RE.search(block.group("body"))
+            if not header:
+                continue
+            declaration = " ".join(header.group("ports").split())
+            ports = ports_from_declaration_list(declaration)
+            if ports:
+                return header.group("name"), ports
+    return "", []
 
 
 def parse_task_with_model(text: str, client) -> TaskContract:

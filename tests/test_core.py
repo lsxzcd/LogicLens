@@ -12,7 +12,7 @@ from agent.error_classifier import classify_error
 from agent.evaluation import discover_tasks, pass_at_k, summarize
 from agent.model_client import extract_verilog
 from agent.repair_policy import build_baseline_prompt, build_generation_prompt
-from agent.task_parser import parse_task, ports_from_rtl
+from agent.task_parser import parse_task, ports_from_rtl, width_from_bracket
 from agent.testbench import (
     candidate_stems,
     detect_dut_module,
@@ -415,6 +415,91 @@ class ToolchainResolutionTests(unittest.TestCase):
             self.assertEqual(vivado_candidates()[0], r"C:\from-env\vivado.bat")
         finally:
             del os.environ["LOGICLENS_VIVADO"]
+
+
+class VerilogEvalPromptParsingTests(unittest.TestCase):
+    """The prompt shapes that broke the parser while covering all 156 tasks.
+
+    Each case here was an actual defect found by tools/check_parsing.py, which
+    compares the parsed interface against the reference implementation's.
+    """
+
+    def test_bullet_interface_with_one_bit_ports(self) -> None:
+        # `- input a` must yield a port called `a`. A prose stoplist containing
+        # the English article "a" silently dropped it.
+        contract = parse_task(
+            "implement a module named TopModule with the following interface.\n"
+            " - input  a\n - input  b\n - output out\n"
+        )
+        self.assertEqual(
+            [(p.name, p.direction, p.width) for p in contract.ports],
+            [("a", "input", 1), ("b", "input", 1), ("out", "output", 1)],
+        )
+
+    def test_bullet_interface_width_annotation(self) -> None:
+        contract = parse_task(
+            " - input  clk\n - input  reset\n - output ena (3 bits)\n - output q   (16 bits)\n"
+        )
+        widths = {p.name: p.width for p in contract.ports}
+        self.assertEqual(widths["ena"], 3)
+        self.assertEqual(widths["q"], 16)
+        self.assertEqual(widths["clk"], 1)
+
+    def test_width_of_a_range_that_does_not_start_at_zero(self) -> None:
+        # `[3:1]` is three bits. max+1 reported four.
+        self.assertEqual(width_from_bracket("[15:0]"), 16)
+        self.assertEqual(width_from_bracket("[3:1]"), 3)
+        self.assertEqual(width_from_bracket("[0:7]"), 8)
+        self.assertIsNone(width_from_bracket("(3 bits)"))
+
+    def test_rtl_range_width_used_for_the_interface(self) -> None:
+        ports = ports_from_rtl("module m (output [3:1] ena, input clk); endmodule")
+        self.assertEqual({p.name: p.width for p in ports}, {"ena": 3, "clk": 1})
+
+    def test_interface_shown_as_an_indented_snippet(self) -> None:
+        # "Bug fixing" prompts show the module to repair as an indented snippet,
+        # with no ``` fence.
+        contract = parse_task(
+            "Consider the following implementation of an 8-bit 2-to-1 mux:\n\n"
+            "  module TopModule (\n"
+            "      input        sel,\n"
+            "      input  [7:0] a,\n"
+            "      input  [7:0] b,\n"
+            "      output       out\n"
+            "  );\n\n"
+            "Unfortunately, this module has a bug.\n"
+        )
+        self.assertEqual(contract.top_module, "TopModule")
+        self.assertEqual(
+            [(p.name, p.direction, p.width) for p in contract.ports],
+            [("sel", "input", 1), ("a", "input", 8), ("b", "input", 8), ("out", "output", 1)],
+        )
+
+    def test_bullet_list_wins_over_a_context_snippet(self) -> None:
+        # One prompt states the interface as bullets and then shows a
+        # `full_module` helper it explicitly says need not be produced. Taking
+        # the snippet's ports would report the wrong interface.
+        contract = parse_task(
+            "implement a module named TopModule with the following interface.\n"
+            " - input  clk\n - input  L\n - input  q_in\n - input  r_in\n - output Q\n\n"
+            'Consider this Verilog module "full_module":\n\n'
+            "  module full_module (\n"
+            "      input [2:0] r,\n"
+            "      input L,\n"
+            "      input clk,\n"
+            "      output reg [2:0] q);\n"
+            "  endmodule\n"
+        )
+        self.assertEqual(contract.top_module, "TopModule")
+        self.assertEqual([p.name for p in contract.ports], ["clk", "L", "q_in", "r_in", "Q"])
+
+    def test_unnamed_top_module_is_flagged(self) -> None:
+        # "consider a top-level module with the following interface" names no
+        # module; the caller can substitute its own dataset default.
+        contract = parse_task("Now consider a top-level module with the following interface:\n - input x\n")
+        self.assertTrue(contract.top_module_is_default)
+        named = parse_task("implement a module named TopModule\n - input x\n")
+        self.assertFalse(named.top_module_is_default)
 
 
 class BaselinePromptTests(unittest.TestCase):

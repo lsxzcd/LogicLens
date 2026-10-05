@@ -30,5 +30,10 @@ jobs:
         # used because one of its tasks intentionally relies on a generated
         # self-check to exercise that code path.
         run: python tools/check_dataset.py experiments/dataset_smoke
+      - name: Interface parsing check
+        # Compares the interface parsed from each prompt against the reference
+        # implementation's ANSI port list. Exits non-zero on a discrepancy that
+        # is neither a recorded upstream prompt bug nor an unnamed module.
+        run: python tools/check_parsing.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
