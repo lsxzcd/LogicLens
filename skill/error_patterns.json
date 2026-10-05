@@ -51,5 +51,14 @@
     "unconstrained path",
     "no clocks found",
     "clock not found"
+  ],
+  "toolchain": [
+    "tclapp::load_apps",
+    "could not open 'c' for writing",
+    "common 17-39",
+    "common 17-354",
+    "invalid option value specified for '-part'",
+    "no such file or directory: vivado",
+    "license"
   ]
 }

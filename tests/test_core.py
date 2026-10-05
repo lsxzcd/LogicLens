@@ -8,9 +8,14 @@ import unittest
 from pathlib import Path
 
 from agent.candidate_ranker import score_result, synthesis_credit
-from agent.error_classifier import classify_error
+from agent.error_classifier import classify_error, failed_stage, stage_log
 from agent.evaluation import discover_tasks, pass_at_k, summarize
-from agent.model_client import extract_verilog
+from agent.model_client import (
+    ModelClient,
+    ModelConfigError,
+    ModelRequestError,
+    extract_verilog,
+)
 from agent.repair_policy import build_baseline_prompt, build_generation_prompt
 from agent.task_parser import parse_task, ports_from_rtl, width_from_bracket
 from agent.testbench import (
@@ -49,6 +54,99 @@ class ErrorClassifierTests(unittest.TestCase):
     def test_classifies_timing_error(self) -> None:
         patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
         self.assertEqual(classify_error("WARNING: unconstrained path remains", patterns), "timing")
+
+
+class StageAwareClassificationTests(unittest.TestCase):
+    """A failure must be classified from the stage that failed.
+
+    The combined log holds every stage's output, so a pattern can match text an
+    unrelated stage produced. A synthesis failure was reported as a simulation
+    mismatch because the word "mismatch" appeared in a later section, which sent
+    the repair loop after the wrong problem.
+    """
+
+    COMBINED = (
+        "===== compile.log =====\nINFO: analyzing module counter\n\n"
+        "===== elaboration.log =====\nCompleted static elaboration\n\n"
+        "===== simulation.log =====\nHint: Output 'zero' has no mismatches.\n"
+        "Mismatches: 0 in 20 samples\n\n"
+        "===== synthesis.log =====\nERROR: [Common 17-39] 'tclapp::load_apps' failed\n"
+    )
+
+    def setUp(self) -> None:
+        self.patterns = json.loads(
+            (Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8")
+        )
+
+    def test_synthesis_section_is_isolated(self) -> None:
+        section = stage_log(self.COMBINED, "synthesis")
+        self.assertIn("tclapp", section)
+        self.assertNotIn("Mismatches: 0", section)
+
+    def test_simulation_section_is_isolated(self) -> None:
+        section = stage_log(self.COMBINED, "simulation")
+        self.assertIn("Mismatches: 0", section)
+        self.assertNotIn("tclapp", section)
+
+    def test_a_passing_simulation_is_not_blamed_for_a_synthesis_failure(self) -> None:
+        # Without stage awareness this returns "simulation_mismatch", because the
+        # simulation section contains the word "mismatches", even though the
+        # simulation passed with zero of them.
+        result = classify_error(self.COMBINED, self.patterns, stage="synthesis")
+        self.assertNotEqual(result, "simulation_mismatch")
+
+    def test_stage_free_classification_still_works(self) -> None:
+        patterns = {"simulation_mismatch": ["mismatches"]}
+        self.assertEqual(classify_error(self.COMBINED, patterns), "simulation_mismatch")
+
+    def test_empty_stage_section_falls_back_to_the_whole_log(self) -> None:
+        # A stage header with nothing under it, followed by a real failure in a
+        # later section: restricting to the empty section would say "unknown".
+        log = (
+            "===== compile.log =====\n\n"
+            "===== simulation.log =====\n"
+            "===== synthesis.log =====\nERROR: [Common 17-39] 'tclapp' failed\n"
+        )
+        patterns = {"synthesis": ["tclapp"]}
+        self.assertEqual(classify_error(log, patterns, stage="simulation"), "synthesis")
+
+    def test_absent_stage_section_falls_back_to_the_whole_log(self) -> None:
+        patterns = {"anything": ["tclapp"]}
+        self.assertEqual(classify_error(self.COMBINED, patterns, stage="timing"), "anything")
+
+    def test_populated_stage_section_still_restricts(self) -> None:
+        # The compile section has content, so only that content is considered.
+        patterns = {"elaboration": ["completed static elaboration"]}
+        self.assertEqual(classify_error(self.COMBINED, patterns, stage="compile"), "unknown")
+
+    def test_failed_stage_follows_the_progressive_verdict(self) -> None:
+        self.assertEqual(failed_stage({"compile_pass": False}), "compile")
+        self.assertEqual(failed_stage({"compile_pass": True, "elaborate_pass": False}), "elaboration")
+        self.assertEqual(
+            failed_stage({"compile_pass": True, "elaborate_pass": True, "simulation_pass": False}),
+            "simulation",
+        )
+        self.assertEqual(
+            failed_stage(
+                {
+                    "compile_pass": True,
+                    "elaborate_pass": True,
+                    "simulation_pass": True,
+                    "synthesis_pass": False,
+                }
+            ),
+            "synthesis",
+        )
+        self.assertIsNone(
+            failed_stage(
+                {
+                    "compile_pass": True,
+                    "elaborate_pass": True,
+                    "simulation_pass": True,
+                    "synthesis_pass": True,
+                }
+            )
+        )
 
 
 class SynthesisCreditTests(unittest.TestCase):
@@ -500,6 +598,125 @@ class VerilogEvalPromptParsingTests(unittest.TestCase):
         self.assertTrue(contract.top_module_is_default)
         named = parse_task("implement a module named TopModule\n - input x\n")
         self.assertFalse(named.top_module_is_default)
+
+
+class ModelClientTests(unittest.TestCase):
+    """Exercised against a local stub server, so no GPU or weights are needed.
+
+    These cover the failures a real endpoint would produce - a wrong path, a
+    transient 5xx, a rejected token - which otherwise only appear in the middle
+    of an evaluation run.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+        import stub_model_server  # noqa: PLC0415
+
+        cls.stub = stub_model_server
+        cls.port = 8791
+        cls.server, _ = stub_model_server.serve(cls.port)
+        cls.base = f"http://127.0.0.1:{cls.port}/v1"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self) -> None:
+        self.stub.StubHandler.attempts = 0
+        self.stub.StubHandler.fail_first = 0
+        self.stub.StubHandler.require_token = ""
+
+    def test_generate_returns_the_message_content(self) -> None:
+        client = ModelClient(url=self.base, model="stub-coder")
+        text = client.generate("write a zero module")
+        self.assertIn("module TopModule", text)
+        self.assertIn("module", extract_verilog(text))
+
+    def test_base_url_and_full_url_are_both_accepted(self) -> None:
+        # Pasting the full chat URL from a sample command must not 404.
+        base = ModelClient(url=self.base, model="stub-coder")
+        full = ModelClient(url=f"{self.base}/chat/completions", model="stub-coder")
+        self.assertEqual(base.url, full.url)
+        self.assertIn("module", full.generate("hi"))
+
+    def test_transient_5xx_is_retried(self) -> None:
+        self.stub.StubHandler.fail_first = 1
+        client = ModelClient(url=self.base, model="stub-coder", retries=2)
+        self.assertIn("module", client.generate("hi"))
+        self.assertEqual(self.stub.StubHandler.attempts, 2)
+
+    def test_retries_are_exhausted_and_reported(self) -> None:
+        self.stub.StubHandler.fail_first = 99
+        client = ModelClient(url=self.base, model="stub-coder", retries=1, timeout=5)
+        with self.assertRaises(ModelRequestError):
+            client.generate("hi")
+        self.stub.StubHandler.fail_first = 0
+
+    def test_client_error_is_not_retried(self) -> None:
+        self.stub.StubHandler.require_token = "secret"
+        client = ModelClient(url=self.base, model="stub-coder", retries=2)
+        with self.assertRaises(ModelRequestError):
+            client.generate("hi")
+        # A 401 cannot succeed on retry, so exactly one attempt is made.
+        self.assertEqual(self.stub.StubHandler.attempts, 0)
+        self.stub.StubHandler.require_token = ""
+
+    def test_api_key_is_sent_as_a_bearer_token(self) -> None:
+        self.stub.StubHandler.require_token = "secret"
+        client = ModelClient(url=self.base, model="stub-coder", api_key="secret")
+        self.assertIn("module", client.generate("hi"))
+        self.stub.StubHandler.require_token = ""
+
+    def test_no_endpoint_raises_a_config_error_not_a_request_error(self) -> None:
+        client = ModelClient(url="", model="stub-coder")
+        with self.assertRaises(ModelConfigError):
+            client.generate("hi")
+
+    def test_probe_reports_success_without_raising(self) -> None:
+        client = ModelClient(url=self.base, model="stub-coder")
+        report = client.probe()
+        self.assertTrue(report["ok"])
+        self.assertIn("elapsed_seconds", report)
+
+    def test_probe_reports_a_missing_endpoint(self) -> None:
+        report = ModelClient(url="").probe()
+        self.assertFalse(report["ok"])
+        self.assertIn("no endpoint", report["error"])
+
+    def test_describe_records_the_sampling_configuration(self) -> None:
+        client = ModelClient(url=self.base, model="stub-coder", temperature=0.3, max_tokens=512, seed=7)
+        described = client.describe()
+        self.assertEqual(described["temperature"], 0.3)
+        self.assertEqual(described["max_tokens"], 512)
+        self.assertEqual(described["seed"], 7)
+
+    def test_seed_and_sampling_reach_the_server(self) -> None:
+        client = ModelClient(url=self.base, model="stub-coder", temperature=0.4, top_p=0.8, seed=11)
+        client.generate("hi")
+        sent = self.stub.StubHandler.last_request
+        self.assertEqual(sent["temperature"], 0.4)
+        self.assertEqual(sent["top_p"], 0.8)
+        self.assertEqual(sent["seed"], 11)
+        self.assertEqual(sent["messages"][-1]["content"], "hi")
+
+
+class VerilogExtractionTests(unittest.TestCase):
+    def test_markdown_fence(self) -> None:
+        self.assertEqual(extract_verilog("x\n```verilog\nmodule m;\n```\ny"), "module m;")
+
+    def test_begin_done_delimiters(self) -> None:
+        # The competition harness asks for these delimiters, so they win over a
+        # fence that happens to appear inside the block.
+        text = "[BEGIN]\nmodule m;\nendmodule\n[DONE]"
+        self.assertEqual(extract_verilog(text), "module m;\nendmodule")
+
+    def test_code_tags(self) -> None:
+        self.assertEqual(extract_verilog("<CODE>module m;</CODE>"), "module m;")
+
+    def test_raw_text_fallback(self) -> None:
+        self.assertEqual(extract_verilog("  module m; endmodule  "), "module m; endmodule")
 
 
 class BaselinePromptTests(unittest.TestCase):
