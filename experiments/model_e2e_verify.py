@@ -1,11 +1,12 @@
 """End-to-end check of the model call path with a real Vivado run.
 
 Starts the stub model server in a background thread, points the agent at it,
-and lets the candidate it returns be graded by the official VerilogEval
-testbench under xsim. The stub is not a model: it returns a canned reply. What
-this proves is that everything around the model works - the request shape, the
-configured sampling, extraction of the code block, and the verdict path - which
-is the part that otherwise only fails in the middle of an evaluation run.
+and has the candidate it returns graded by the official VerilogEval testbench
+under xsim. The stub is not a model: it returns a canned reply. What this proves
+is that everything around the model works - the request shape, the configured
+sampling, extraction of the code block, the verdict path, and the attribution of
+a failure to the right stage - which is the part that otherwise only fails in
+the middle of an evaluation run.
 
 Run: py -3 experiments/model_e2e_verify.py [--port 8799]
 """
