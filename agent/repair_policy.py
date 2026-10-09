@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from .task_parser import TaskContract
 
+# Error categories that a code change cannot fix: the toolchain itself failed,
+# or the failure is a host configuration problem. Retrying would burn wall clock
+# and could mutate correct code into incorrect code.
+NON_REPAIRABLE = frozenset({"toolchain"})
+
 
 def build_baseline_prompt(question: str) -> str:
     """Prompt for the gain baseline.

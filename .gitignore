@@ -7,6 +7,18 @@ __pycache__/
 # fixtures and verification scripts the team shares.
 experiments/runs/
 experiments/results/
+# The full VerilogEval export is ~470 KB and reproducible in one command:
+#   py -3 tools/fetch_verilogeval_problem.py --all experiments/data/verilogeval
+# Only a small representative set is vendored, so the parsing check and the
+# end-to-end verification have something to run against without the whole set.
+experiments/data/verilogeval/examples/*
+!experiments/data/verilogeval/examples/Prob001_zero_*
+!experiments/data/verilogeval/examples/Prob090_circuit1_*
+!experiments/data/verilogeval/examples/Prob100_fsm3comb_*
+!experiments/data/verilogeval/examples/Prob104_mt2015_muxdff_*
+!experiments/data/verilogeval/examples/Prob120_fsm3s_*
+!experiments/data/verilogeval/examples/Prob131_mt2015_q4_*
+!experiments/data/verilogeval/examples/Prob156_review2015_fancytimer_*
 *.jou
 *.log
 *.str

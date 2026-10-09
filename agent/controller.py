@@ -6,9 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .candidate_ranker import score_result, synthesis_credit
-from .error_classifier import classify_error, load_patterns
+from .error_classifier import classify_error, failed_stage, load_patterns
 from .model_client import ModelClient, extract_verilog
-from .repair_policy import build_generation_prompt, build_repair_prompt
+from .repair_policy import NON_REPAIRABLE, build_generation_prompt, build_repair_prompt
 from .task_parser import parse_task
 from .testbench import resolve_reference_answer, resolve_testbench
 from .vivado_runner import run_vivado_flow
@@ -23,6 +23,7 @@ class LogicLensAgent:
         max_attempts: int = 3,
         testbench: Path | None = None,
         testbench_mode: str = "auto",
+        model_client: ModelClient | None = None,
     ):
         self.project_root = project_root
         self.vivado = vivado
@@ -31,7 +32,7 @@ class LogicLensAgent:
         self.testbench = testbench
         self.testbench_mode = testbench_mode
         self.patterns = load_patterns(project_root / "skill" / "error_patterns.json")
-        self.client = ModelClient()
+        self.client = model_client or ModelClient()
 
     def _run_dir(self) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -79,6 +80,7 @@ class LogicLensAgent:
 
         best = None
         best_score = (-1, -1, -999)
+        stopped_reason = ""
         for attempt in range(1, self.max_attempts + 1):
             attempt_dir = run_dir / f"attempt_{attempt}"
             attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -102,14 +104,23 @@ class LogicLensAgent:
                 and synthesis_credit(flow)
                 and flow.get("timing_constraint_pass", True)
             )
-            error_type = "none" if verified else classify_error(flow.get("log", ""), self.patterns)
-            record = {"attempt": attempt, "error_type": error_type, **flow}
+            error_type = (
+                "none"
+                if verified
+                else classify_error(flow.get("log", ""), self.patterns, stage=failed_stage(flow))
+            )
+            record = {"attempt": attempt, "error_type": error_type, "failed_stage": failed_stage(flow), **flow}
             history.append(record)
             current_score = score_result(flow, attempt)
             if current_score > best_score:
                 best_score = current_score
                 best = {"attempt": attempt, "code": current_code, **flow}
             if verified:
+                break
+            if error_type in NON_REPAIRABLE:
+                # A toolchain or host failure is not something the model can
+                # repair, so stopping is both faster and safer than resampling.
+                stopped_reason = error_type
                 break
             if attempt < self.max_attempts and not self.mock:
                 repair_prompt = build_repair_prompt(contract, current_code, error_type, flow.get("log", ""), skill_text)
@@ -136,6 +147,9 @@ class LogicLensAgent:
             ),
             "mode": "mock" if self.mock else "agent",
             "source": source,
+            # Recorded so a reported pass@k can be reproduced: the competition
+            # requires the sampling and context configuration to be declared.
+            "model": self.client.describe(),
             "contract": contract.to_dict(),
             "testbench": {
                 "top": tb_top,
@@ -147,6 +161,7 @@ class LogicLensAgent:
                 "notes": spec.notes,
             },
             "best_attempt": best.get("attempt"),
+            "stopped_early": stopped_reason,
             "compile_pass": best.get("compile_pass", False),
             "elaborate_pass": best.get("elaborate_pass", False),
             "simulation_pass": best.get("simulation_pass", False),
