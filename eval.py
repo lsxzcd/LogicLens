@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from agent.cli import add_model_arguments, client_from_args, compare_configurations
 from agent.evaluation import EvalConfig, render_gain_table, run_evaluation
 
 
@@ -25,12 +26,20 @@ def main() -> int:
     )
     parser.add_argument("--out", default=None, help="Output directory for results.csv and summary.json")
     parser.add_argument("--runs-dir", default=None, help="Where per-run artifacts are written")
+    # Shared with run.py and run_baseline.py, so a batch run cannot end up with
+    # the two sides configured differently.
+    add_model_arguments(parser)
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
     dataset = Path(args.dataset).resolve()
     out_root = Path(args.out).resolve() if args.out else None
     runs_dir = Path(args.runs_dir).resolve() if args.runs_dir else None
+
+    # ONE client for the whole run, shared by both modes. Building a client per
+    # mode would let the baseline and the agent run different models without
+    # anything saying so, and the gain would then be meaningless.
+    client = client_from_args(args)
 
     def build(mode: str) -> EvalConfig:
         return EvalConfig(
@@ -44,6 +53,7 @@ def main() -> int:
             runs_dir=runs_dir,
             seed=args.seed,
             limit=args.limit,
+            model_client=client,
         )
 
     summaries: dict[str, dict] = {}
@@ -57,6 +67,22 @@ def main() -> int:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     if "baseline" in summaries and "agent" in summaries:
+        # The gain only means something if both sides ran the same model with the
+        # same sampling settings, so a mismatch is reported here rather than left
+        # for a reader to spot in the summaries.
+        differences = compare_configurations(
+            summaries["agent"].get("model_configuration", {}),
+            summaries["baseline"].get("model_configuration", {}),
+        )
+        if differences:
+            print("\n" + "!" * 72)
+            print("警告：基线与智能体的模型配置不一致，增益数据不可信：")
+            for line in differences:
+                print(f"  - {line}")
+            print("!" * 72)
+        else:
+            print("\n模型配置一致性检查：基线与智能体一致")
+
         table = render_gain_table(summaries["baseline"], summaries["agent"])
         print("\n" + table)
         destination = (out_root or Path(summaries["agent"]["output_dir"]).parent) / "gain.md"

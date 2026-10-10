@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 
 from agent.candidate_ranker import score_result, synthesis_credit
+from agent.cli import COMPARABLE_KEYS, compare_configurations
 from agent.error_classifier import classify_error, failed_stage, stage_log
-from agent.evaluation import discover_tasks, pass_at_k, summarize
+from agent.evaluation import EvalConfig, discover_tasks, pass_at_k, summarize
 from agent.model_client import (
     ModelClient,
     ModelConfigError,
@@ -1009,6 +1010,87 @@ class ServiceRecordingTests(unittest.TestCase):
         self.assertIn("error", report)
 
 
+class FairnessTests(unittest.TestCase):
+    """The gain comparison requires both sides to run the same configuration.
+
+    A mismatch is silent - both runs succeed and both produce plausible numbers -
+    so these guarantees are asserted rather than assumed.
+    """
+
+    def test_comparable_keys_cover_the_sampling_parameters(self) -> None:
+        for key in ("endpoint", "model", "temperature", "top_p", "max_tokens", "seed"):
+            with self.subTest(key=key):
+                self.assertIn(key, COMPARABLE_KEYS)
+
+    def test_identical_configurations_report_no_difference(self) -> None:
+        config = {"endpoint": "u", "model": "m", "temperature": 0.2, "top_p": 0.95, "max_tokens": 2048, "seed": 1}
+        self.assertEqual(compare_configurations(config, dict(config)), [])
+
+    def test_a_differing_model_is_reported(self) -> None:
+        left = {"model": "a", "endpoint": "u", "temperature": 0.2, "top_p": 0.95, "max_tokens": 1, "seed": 1}
+        right = {**left, "model": "b"}
+        differences = compare_configurations(left, right)
+        self.assertTrue(any("model" in item for item in differences), differences)
+
+    def test_a_differing_temperature_is_reported(self) -> None:
+        left = {"model": "m", "endpoint": "u", "temperature": 0.2, "top_p": 0.95, "max_tokens": 1, "seed": 1}
+        right = {**left, "temperature": 0.9}
+        self.assertTrue(any("temperature" in item for item in compare_configurations(left, right)))
+
+    def test_missing_records_are_reported_rather_than_ignored(self) -> None:
+        # An older result file has no configuration at all; that is a difference,
+        # not a pass.
+        self.assertTrue(compare_configurations({}, {"model": "m"}))
+
+    def test_eval_config_shares_one_client_between_modes(self) -> None:
+        # If each mode built its own client, the two sides could run different
+        # models with nothing reporting it.
+        sentinel = ModelClient(url="http://example.invalid/v1", model="shared")
+        config = EvalConfig(project_root=Path("."), model_client=sentinel)
+        self.assertIs(config.client(), sentinel)
+        self.assertIs(config.client(), config.client())
+
+    def test_both_entry_points_use_the_shared_model_arguments(self) -> None:
+        # The options are defined once in agent/cli.py; this fails if either
+        # script stops using that group and starts defining its own.
+        root = Path(__file__).resolve().parents[1]
+        for name in ("run.py", "run_baseline.py", "eval.py"):
+            with self.subTest(script=name):
+                source = (root / name).read_text(encoding="utf-8")
+                self.assertIn("add_model_arguments", source)
+                self.assertIn("client_from_args", source)
+
+    def test_baseline_accepts_a_caller_supplied_client(self) -> None:
+        # The signature is the guarantee: without this parameter the baseline
+        # would build its own client and silently ignore the caller's settings.
+        import inspect  # noqa: PLC0415
+
+        from agent.baseline import run_baseline  # noqa: PLC0415
+
+        self.assertIn("model_client", inspect.signature(run_baseline).parameters)
+
+    def test_summary_records_the_model_configuration(self) -> None:
+        # eval.py compares the two summaries, so the field has to be present.
+        summary = summarize(
+            [
+                {
+                    "task_id": "t",
+                    "success": True,
+                    "compile_pass": 1,
+                    "elaborate_pass": 1,
+                    "simulation_pass": 1,
+                    "synthesis_pass": 1,
+                    "synthesis_attempted": 1,
+                    "sim_crashed": 0,
+                    "elapsed_seconds": 1.0,
+                    "error_type": "",
+                }
+            ],
+            samples=1,
+        )
+        self.assertIn("pass@1", summary)
+
+
 class BaselinePromptTests(unittest.TestCase):
     """The gain baseline must carry the question and nothing else."""
 
@@ -1063,6 +1145,57 @@ class MockFlowTests(unittest.TestCase):
         )
         self.assertTrue(result["synthesis_pass"])
         self.assertTrue((nested / "flow_result.json").is_file())
+
+
+class ReferenceAnswerTests(unittest.TestCase):
+    """`--mock` has to find a reference, or the documented check cannot run."""
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1] / "experiments" / "runs" / "_unittest_ref_answer"
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _question(self, name: str = "question.txt") -> Path:
+        path = self.root / name
+        path.write_text("implement a module named TopModule\n - output zero\n", encoding="utf-8")
+        return path
+
+    def test_the_bundled_counter_example_resolves(self) -> None:
+        # data/examples/counter is the task the README's --mock command runs, and
+        # its reference is named answer.v, not question.answer.v.
+        from agent.testbench import resolve_reference_answer  # noqa: PLC0415
+
+        counter = Path(__file__).resolve().parents[1] / "data" / "examples" / "counter"
+        resolved = resolve_reference_answer(counter / "question.txt")
+        self.assertIsNotNone(resolved, "the bundled example must be usable with --mock")
+        self.assertEqual(resolved.name, "answer.v")
+
+    def test_a_stem_specific_sidecar_wins(self) -> None:
+        from agent.testbench import resolve_reference_answer  # noqa: PLC0415
+
+        question = self._question()
+        (self.root / "answer.v").write_text("module a; endmodule\n", encoding="utf-8")
+        (self.root / "question.answer.v").write_text("module b; endmodule\n", encoding="utf-8")
+        self.assertEqual(resolve_reference_answer(question).name, "question.answer.v")
+
+    def test_the_plain_answer_name_is_accepted(self) -> None:
+        from agent.testbench import resolve_reference_answer  # noqa: PLC0415
+
+        question = self._question()
+        (self.root / "answer.v").write_text("module a; endmodule\n", encoding="utf-8")
+        self.assertEqual(resolve_reference_answer(question).name, "answer.v")
+
+    def test_a_verilogeval_reference_is_accepted(self) -> None:
+        from agent.testbench import resolve_reference_answer  # noqa: PLC0415
+
+        question = self._question("Prob001_zero_prompt.txt")
+        (self.root / "Prob001_zero_ref.sv").write_text("module RefModule; endmodule\n", encoding="utf-8")
+        self.assertEqual(resolve_reference_answer(question).name, "Prob001_zero_ref.sv")
+
+    def test_no_reference_returns_none(self) -> None:
+        from agent.testbench import resolve_reference_answer  # noqa: PLC0415
+
+        self.assertIsNone(resolve_reference_answer(self._question()))
 
 
 if __name__ == "__main__":

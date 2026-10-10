@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from agent.baseline import run_baseline
+from agent.cli import add_model_arguments, client_from_args
 
 
 def main() -> int:
@@ -20,6 +21,8 @@ def main() -> int:
         default="auto",
         help="How to obtain a testbench: explicit/sidecar file, or generate one",
     )
+    # Shared with run.py so the two sides cannot drift apart.
+    add_model_arguments(parser)
     args = parser.parse_args()
 
     result = run_baseline(
@@ -30,6 +33,7 @@ def main() -> int:
         run_dir=Path(args.run_dir).resolve() if args.run_dir else None,
         testbench=Path(args.testbench).resolve() if args.testbench else None,
         testbench_mode=args.testbench_mode,
+        model_client=client_from_args(args),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("success") else 1
@@ -37,4 +41,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

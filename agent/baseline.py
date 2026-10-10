@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -26,11 +27,27 @@ def run_baseline(
     run_dir: Path | None = None,
     testbench: Path | None = None,
     testbench_mode: str = "auto",
+    model_client: ModelClient | None = None,
 ) -> dict:
+    """Run the single-shot baseline the gain is measured against.
+
+    The competition requires this to use the *same* inference service and
+    context configuration as the agent while bypassing the agent and the skill
+    package. That only holds if the caller hands in the same client, so
+    `model_client` is an explicit parameter rather than something this function
+    builds for itself: constructing a fresh client here would silently fall back
+    to defaults, and the two sides could then be running different models, which
+    would make the reported gain meaningless.
+
+    The configuration actually used is recorded in the result so a reader can
+    check the two sides against each other.
+    """
+    started = time.perf_counter()
     run_dir = run_dir or _default_run_dir(project_root, "baseline")
     run_dir.mkdir(parents=True, exist_ok=True)
     question = question_path.read_text(encoding="utf-8")
     contract = parse_task(question)
+    client = model_client or ModelClient()
     if mock:
         reference = resolve_reference_answer(question_path)
         if reference is None:
@@ -40,8 +57,10 @@ def run_baseline(
             )
         code = reference.read_text(encoding="utf-8")
     else:
+        # The baseline prompt is the question text and nothing else: no skill
+        # package, no structured contract, no retry.
         prompt = build_baseline_prompt(question)
-        code = extract_verilog(ModelClient().generate(prompt))
+        code = extract_verilog(client.generate(prompt, attempt=1))
     shutil.copyfile(question_path, run_dir / "question.txt")
 
     spec = resolve_testbench(
@@ -84,6 +103,10 @@ def run_baseline(
             and flow.get("timing_constraint_pass", True)
         ),
         "mode": "baseline",
+        "source": "baseline",
+        # Recorded so the agent's own record can be checked against it: the two
+        # must agree on endpoint and every sampling parameter.
+        "model": client.describe(),
         "contract": contract.to_dict(),
         "testbench": {
             "top": tb_top,
@@ -94,6 +117,7 @@ def run_baseline(
             "relax_compile": spec.relax_compile,
             "notes": spec.notes,
         },
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
         **flow,
     }
     (run_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
