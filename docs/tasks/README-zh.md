@@ -15,6 +15,15 @@
 | **B** | [task-B-agent-quality-zh.md](task-B-agent-quality-zh.md) | 智能体质量 | ❌ 不需要，本机即可 |
 | **C** | [task-C-deployment-zh.md](task-C-deployment-zh.md) | 部署与容器（实验室机器） | ✅ 需要 |
 
+## 另外一份：远控操作单
+
+| 文档 | 用途 |
+|---|---|
+| **[lab-machine-operation-guide-zh.md](lab-machine-operation-guide-zh.md)** | **远控连上实验室机器后照着念的操作单** |
+
+远控时你看不到聊天记录，所以这份文档把**命令、预期输出、异常判断、该复制什么回来**全写在里面，
+按第 0 步到第 6 步顺序执行即可。**第 1 步（环境勘察）的输出是关键**——它决定模型选型。
+
 ---
 
 ## 每份任务书包含什么
