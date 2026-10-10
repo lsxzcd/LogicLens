@@ -13,6 +13,12 @@
 *.json text eol=lf
 *.txt text eol=lf
 
+# Git on Windows does not record the executable bit, so the mode is declared
+# here. Without it the container fails with "Permission denied" when it tries to
+# run the entry point.
+*.sh executable
+serve/entrypoint.sh executable
+
 # Windows-only helpers keep their native endings.
 *.ps1 text eol=crlf
 *.bat text eol=crlf

@@ -861,6 +861,126 @@ class PromptContractTests(unittest.TestCase):
         self.assertEqual(build_baseline_prompt(question), question)
 
 
+class SubmissionLayoutTests(unittest.TestCase):
+    """The submission shape the topic guide prescribes (3.1.5.1).
+
+    These fail loudly rather than at packaging time, when the required name is
+    easy to have drifted.
+    """
+
+    REQUIRED = (
+        "Dockerfile",
+        "Dockerfile.bundled",
+        ".dockerignore",
+        "model/MODEL.md",
+        "agent",
+        "skill",
+        "serve",
+        "run.sh",
+        "run_baseline.sh",
+        "REPORT.md",
+    )
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1]
+
+    def test_every_required_submission_path_exists(self) -> None:
+        for relative in self.REQUIRED:
+            with self.subTest(path=relative):
+                self.assertTrue((self.root / relative).exists(), f"missing {relative}")
+
+    def test_shell_scripts_are_not_crlf(self) -> None:
+        # A CRLF shell script fails inside the Linux base image with "bad
+        # interpreter", so this is checked before it can reach a container.
+        scripts = sorted(self.root.glob("**/*.sh"))
+        self.assertTrue(scripts, "expected at least one shell script")
+        for script in scripts:
+            if ".git" in script.parts:
+                continue
+            with self.subTest(script=str(script.relative_to(self.root))):
+                data = script.read_bytes()
+                self.assertNotIn(b"\r\n", data, "shell script uses CRLF line endings")
+
+    def test_dockerfile_parameterises_the_base_image(self) -> None:
+        # The guide fixes the base image but has not published its name, so it
+        # must be a build argument rather than hardcoded.
+        text = (self.root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG BASE_IMAGE", text)
+        self.assertIn("FROM ${BASE_IMAGE}", text)
+
+    def test_bundled_dockerfile_copies_the_weights(self) -> None:
+        text = (self.root / "Dockerfile.bundled").read_text(encoding="utf-8")
+        self.assertIn("COPY model-weights/ /models/", text)
+        # And fails the build if nothing arrived, rather than at evaluation time.
+        self.assertIn("no weights copied", text)
+
+    def test_dockerfile_makes_the_entrypoint_executable(self) -> None:
+        # Git on Windows cannot record the executable bit, so relying on the
+        # checkout's mode would fail inside the container.
+        for name in ("Dockerfile", "Dockerfile.bundled"):
+            with self.subTest(dockerfile=name):
+                text = (self.root / name).read_text(encoding="utf-8")
+                self.assertIn("chmod +x", text)
+                self.assertIn("serve/entrypoint.sh", text)
+
+    def test_service_entrypoint_verifies_weights_before_starting(self) -> None:
+        # The sandbox is offline, so a missing model must fail immediately
+        # rather than surfacing as an evaluation-time error.
+        text = (self.root / "serve" / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn("no model weights", text)
+        self.assertIn("serve/record_service.py", text)
+
+
+class ServiceRecordingTests(unittest.TestCase):
+    """serve/record_service.py turns a server's own report into MODEL.md data."""
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "serve"))
+        import record_service  # noqa: PLC0415
+
+        self.module = record_service
+
+    def test_render_includes_the_fields_model_md_requires(self) -> None:
+        report = {
+            "host": "http://127.0.0.1:11434",
+            "server_version": "0.40.2",
+            "model": "qwen2.5-coder:1.5b",
+            "parameter_size": "1.5B",
+            "quantization": "Q4_K_M",
+            "digest": "abc123",
+            "on_disk_bytes": 986062089,
+            "resident_bytes": 1169980128,
+            "size_vram_bytes": 0,
+            "gpu_accelerated": False,
+            "model_context_length": 32768,
+            "context_length_loaded": 4096,
+            "runner": "llamacpp",
+            "driver": "unavailable",
+            "residency_note": "size_vram is 0",
+        }
+        text = self.module.render(report)
+        for expected in ("Q4_K_M", "abc123", "986.1 MB", "resident in VRAM", "context length (model)", "GPU accelerated"):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+
+    def test_a_zero_vram_reading_is_called_out(self) -> None:
+        # This is exactly what the development machine reports, and it must not
+        # be mistaken for evidence that the model fits the card.
+        report = {"model": "m", "size_vram_bytes": 0, "gpu_accelerated": False}
+        self.assertIn("resident in VRAM         : n/a", self.module.render(report))
+
+    def test_unavailable_driver_is_reported_not_hidden(self) -> None:
+        # Neither rocm-smi nor nvidia-smi exists on the development machine.
+        result = self.module._gpu_processes()
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.strip(), "the driver report must never be empty")
+
+    def test_collect_reports_an_unreachable_service_without_raising(self) -> None:
+        # Port chosen to have nothing listening on it.
+        report = self.module.collect("http://127.0.0.1:9", "nothing")
+        self.assertIn("error", report)
+
+
 class BaselinePromptTests(unittest.TestCase):
     """The gain baseline must carry the question and nothing else."""
 

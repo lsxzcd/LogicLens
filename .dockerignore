@@ -1,0 +1,43 @@
+# Keep the build context small and the image reproducible.
+#
+# Run artifacts and the vendored dataset export are local scratch state: copying
+# them would make an image depend on whatever happened to be on the build
+# machine, and Vivado output alone can be hundreds of megabytes.
+
+.git/
+.github/
+.tmp/
+.pylibs/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Vivado and simulator output
+*.jou
+*.log
+*.str
+*.wdb
+*.pb
+.Xil/
+xsim.dir/
+dfx_runtime.txt
+hs_err_pid*
+
+# Evaluation scratch and results: these are per-run and large
+experiments/runs/
+experiments/results/
+experiments/data/verilogeval/examples/
+
+# Model weights never travel in the build context by default. To produce the
+# self-contained variant, place them in model-weights/ (a file must exist there
+# or Docker fails on the COPY) and build with --build-arg BUNDLE_MODEL=1.
+model-weights/
+!model-weights/.keep
+
+# Local service configuration and measurements
+.env.serve
+model/service-measurements.json
+
+# Report drafts using the mock answer are not part of the submission
+*.bak
+*.orig
