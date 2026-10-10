@@ -1,0 +1,78 @@
+{
+  "$comment": "Machine-readable skill card set. Each card records a failure that was actually observed while running the VerilogEval suite against a local model, the rule that addresses it, how the rule is enforced, and the measured change in outcome. Consumers: agent/repair_policy.py (prompt rules) and agent/rtl_lint.py (mechanical checks). Kept separate from error_patterns.json, which maps raw tool text to an error category.",
+  "version": "2026-10-10",
+  "model_under_test": {
+    "name": "qwen2.5-coder:1.5b",
+    "runtime": "Ollama 0.40.2, CPU only (the development machine has no discrete GPU)",
+    "why": "smallest model that still produced usable Verilog, chosen so the pipeline could be exercised without a GPU"
+  },
+  "cards": [
+    {
+      "id": "interface-contract",
+      "title": "Declare exactly the ports the task specifies; never add a clock or reset",
+      "source_failure": "The model added `input wire clk` and `input wire rst_n` to every task, including tasks whose interface is a single output. 5 of 5 tasks failed on the first run because the official testbench instantiates the module with only the specified ports, leaving the invented ones unconnected.",
+      "observed_evidence": "xvlog reported `port 'clk' is not connected on this instance` and `port 'rst_n' remains unconnected`; compile and elaborate still passed, so the defect only surfaced at simulation.",
+      "rule": "Declare exactly the ports in the contract, no others. If no clock port is listed the module is combinational.",
+      "enforced_by": ["generation prompt: render_port_list + interface rules", "agent/rtl_lint.py: check_clock_edges, check_undeclared_identifiers"],
+      "measured_effect": "pass@1 on the first 5 VerilogEval tasks went from 0.0 to 0.2",
+      "validated_on": 5,
+      "status": "effective"
+    },
+    {
+      "id": "combinational-skeleton",
+      "title": "Give a concrete code skeleton, not only an abstract rule",
+      "source_failure": "After being told not to declare a clock, the model still wrote `always @(posedge clk)` and referenced the now-undeclared `clk`, which failed to compile (`'clk' is not declared`).",
+      "observed_evidence": "Three consecutive attempts produced byte-identical broken code; the interface was correct but the body contradicted it.",
+      "rule": "Show the exact shape to copy for a combinational module and for a sequential one, before the task text.",
+      "enforced_by": ["generation prompt: the two skeletons in _INTERFACE_RULES"],
+      "measured_effect": "pass@1 went from 0.2 to 0.4",
+      "validated_on": 5,
+      "status": "effective"
+    },
+    {
+      "id": "no-code-anchoring",
+      "title": "Do not show the model its failed code in the repair prompt",
+      "source_failure": "The repair prompt quoted the broken module. The model reproduced that module's structure verbatim on every attempt, ignoring both the error message and a changed seed, so all repair rounds were wasted.",
+      "observed_evidence": "MD5 of the generated file was identical across attempts 1, 2 and 3. A controlled comparison of three repair prompts on one task: showing the code gave 3/3 outputs containing posedge/negedge; withholding the code and giving only the error summary gave 0/3.",
+      "rule": "The repair prompt carries the interface constraints and a short error summary, never the failing code.",
+      "enforced_by": ["agent/repair_policy.py: build_repair_prompt, _summarise_log"],
+      "measured_effect": "pass@1 went from 0.4 to 0.6",
+      "validated_on": 5,
+      "status": "effective"
+    },
+    {
+      "id": "structural-lint",
+      "title": "Check structure before spending a simulation",
+      "source_failure": "Two failure shapes are decidable from the source alone: an edge sensitivity on a signal that is not the clock (or on any signal when the task is combinational), and an output assembled from shifted slices of one input at matching offsets, which reproduces that input unchanged (a byte swap that swaps nothing).",
+      "observed_evidence": "`always @(posedge in)` on a NOT gate; `assign out = b3<<24 | b2<<16 | b1<<8 | b0` where bN = in[...] at the same position. Both passed compilation.",
+      "rule": "Run agent/rtl_lint.py on each candidate and put its findings into the repair prompt.",
+      "enforced_by": ["agent/rtl_lint.py", "agent/controller.py: findings recorded per attempt"],
+      "measured_effect": "pass@1 went from 0.6 to 0.8 on the same 5 tasks",
+      "validated_on": 5,
+      "status": "effective"
+    },
+    {
+      "id": "seed-offset-per-attempt",
+      "title": "Offset the seed per attempt so a repair can differ from what it fixes",
+      "source_failure": "With a fixed seed the local server is fully deterministic - raising the temperature does not change that - so a repair round returned byte-identical code. A pinned seed is desirable for reproducibility but must not be reused across attempts.",
+      "observed_evidence": "Repeating one request 3x with seed=1 gave 1 distinct output at temperature 0.2 and also at 0.8; removing the seed gave 2 distinct outputs. Adjacent seeds (1,2,3,4,7,100,101) each produced different text.",
+      "rule": "Send seed = base + (attempt - 1). The run stays reproducible; a repair can still differ.",
+      "enforced_by": ["agent/model_client.py: _payload", "agent/controller.py: generate(..., attempt=n)"],
+      "measured_effect": "necessary for any repair to work at all; on its own it did not change pass@1, because the prompt was the real cause",
+      "validated_on": 5,
+      "status": "necessary-not-sufficient"
+    },
+    {
+      "id": "capability-limit-clock-removal",
+      "title": "A 1.5B model may not remove the invented clock even when told exactly why",
+      "source_failure": "On Prob002_m2014_q4i the model still emitted `always @(posedge clk)` after three attempts, each carrying both lint findings and the compile error `'clk' is not declared`.",
+      "observed_evidence": "lint_findings recorded on all three attempts: undeclared_clock_signal and combinational_uses_edge. The generated file was unchanged in shape.",
+      "rule": "Recorded as a known model limitation rather than a prompt defect. Re-test with the 7B+ model on the AMD machine before adding further prompt machinery.",
+      "enforced_by": [],
+      "measured_effect": "1 of 5 tasks still failed on this pattern",
+      "validated_on": 5,
+      "status": "open-limitation"
+    }
+  ],
+  "measurement_note": "All pass@1 figures are 1 sample per task over the same first 5 VerilogEval tasks (Prob001..Prob005), seed base 1, temperature 0.2, on CPU. 5 tasks is too few to be a performance claim; the figures are evidence that each rule changed behaviour, not a reported benchmark. Re-measure on the full 156-task set on the AMD machine."
+}

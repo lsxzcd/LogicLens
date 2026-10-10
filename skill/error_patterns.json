@@ -3,7 +3,10 @@
     "syntax error",
     "unexpected token",
     "parse error",
-    "near \"endmodule\""
+    "invalid module item",
+    "near \"endmodule\"",
+    "is not declared",
+    "undeclared identifier"
   ],
   "width_mismatch": [
     "width mismatch",
@@ -32,17 +35,26 @@
     "reset mismatch",
     "reset semantic"
   ],
+  "port_mismatch": [
+    "is not connected on this instance",
+    "remains unconnected",
+    "port size",
+    "too many port connections",
+    "expects port"
+  ],
   "simulation_mismatch": [
     "$fatal",
     "fatal:",
     "test failed",
-    "mismatch",
-    "assertion failed"
+    "assertion failed",
+    "has mismatches",
+    "mismatched samples"
   ],
   "synthesis": [
     "cannot synthesize",
     "not synthesizable",
-    "synth_design failed"
+    "synth_design failed",
+    "not supported in synthesis"
   ],
   "timing": [
     "timing violation",

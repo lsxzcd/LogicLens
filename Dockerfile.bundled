@@ -1,0 +1,78 @@
+# Self-contained variant: the model weights are copied into the image.
+#
+# Use this only when the submission must carry its own weights. It produces a
+# much larger image and every model change requires a rebuild, which is why the
+# default Dockerfile keeps the weights on a mounted volume
+# (see serve/README-zh.md).
+#
+# Preparing the weights, then building:
+#
+#   ollama pull qwen2.5-coder:1.5b
+#
+#   # The default .dockerignore excludes model-weights/, and Docker only reads a
+#   # file named .dockerignore, so build from a purpose-made context instead of
+#   # loosening the default one:
+#   rm -rf .buildctx && mkdir .buildctx
+#   cp -r agent skill serve vivado tools tests experiments model \
+#         run.py run.sh run_baseline.py run_baseline.sh eval.py \
+#         requirements.txt README.md REPORT.md CONTRIBUTING.md .buildctx/
+#   cp -r "$OLLAMA_MODELS" .buildctx/model-weights
+#   cp Dockerfile.bundled .buildctx/Dockerfile
+#   printf 'experiments/runs/\nexperiments/results/\n' > .buildctx/.dockerignore
+#
+#   docker build --build-arg BASE_IMAGE=<official-image> -t logiclens:bundled .buildctx
+#
+# The requirement is that the container works with no network, so verify with
+# the network disabled:
+#   docker run --rm --network none logiclens:bundled --check
+
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG MODEL_NAME=qwen2.5-coder:1.5b
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            bash ca-certificates curl python3 python3-venv; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+WORKDIR /opt/logiclens
+
+COPY agent/            ./agent/
+COPY skill/            ./skill/
+COPY serve/            ./serve/
+COPY vivado/           ./vivado/
+COPY tools/            ./tools/
+COPY tests/            ./tests/
+COPY experiments/*.py  ./experiments/
+COPY model/            ./model/
+COPY run.py run.sh run_baseline.py run_baseline.sh eval.py requirements.txt ./
+COPY README.md REPORT.md CONTRIBUTING.md ./
+
+RUN chmod +x serve/start.sh serve/fetch-model.sh serve/entrypoint.sh run.sh run_baseline.sh
+
+# The weights. This directory must exist and be non-empty in the build context;
+# .dockerignore explicitly re-includes it for this file's sake.
+COPY model-weights/ /models/
+
+ENV OLLAMA_MODELS=/models \
+    LOGICLENS_MODEL_NAME=${MODEL_NAME} \
+    LOGICLENS_MODEL_URL=http://127.0.0.1:11434/v1 \
+    LOGICLENS_TEMPERATURE=0.2 \
+    LOGICLENS_TOP_P=0.95 \
+    LOGICLENS_MAX_TOKENS=2048 \
+    LOGICLENS_TIMEOUT=300 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Fail at build time, not at evaluation time, if the weights did not arrive.
+RUN test -n "$(ls -A /models)" || { echo "no weights copied into /models" >&2; exit 1; }
+
+ENTRYPOINT ["/opt/logiclens/serve/entrypoint.sh"]
+CMD ["/task/question.txt"]

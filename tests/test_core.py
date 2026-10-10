@@ -16,7 +16,14 @@ from agent.model_client import (
     ModelRequestError,
     extract_verilog,
 )
-from agent.repair_policy import build_baseline_prompt, build_generation_prompt
+from agent.repair_policy import (
+    build_baseline_prompt,
+    build_generation_prompt,
+    build_repair_prompt,
+    describe_sequential,
+    render_port_list,
+)
+from agent.rtl_lint import lint
 from agent.task_parser import parse_task, ports_from_rtl, width_from_bracket
 from agent.testbench import (
     candidate_stems,
@@ -717,6 +724,289 @@ class VerilogExtractionTests(unittest.TestCase):
 
     def test_raw_text_fallback(self) -> None:
         self.assertEqual(extract_verilog("  module m; endmodule  "), "module m; endmodule")
+
+
+class StructuralLintTests(unittest.TestCase):
+    """Rules distilled from real failures of a small local model.
+
+    The contracts are written inline rather than read from the vendored
+    VerilogEval fixtures. Only a small representative subset of that dataset is
+    committed, so a test that depended on a specific task file would pass on a
+    machine with a full local export and fail in a fresh clone.
+    """
+
+    ZERO = "implement a module named TopModule with the following interface.\n - output zero\n"
+    NOTGATE = "implement a module named TopModule with the following interface.\n - input in\n - output out\n"
+    BYTESWAP = (
+        "implement a module named TopModule with the following interface.\n"
+        " - input [31:0] in\n - output [31:0] out\n"
+    )
+    SEQ = (
+        "implement a module named TopModule with the following interface.\n"
+        " - input clk\n - input d\n - output q\n"
+    )
+
+    def test_invented_clock_without_a_port_is_flagged(self) -> None:
+        # Observed on every combinational task: `always @(posedge clk)` with no
+        # clk port, which fails to compile.
+        rtl = "module TopModule (output wire zero);\nalways @(posedge clk) begin zero <= 1'b0; end\nendmodule"
+        rules = {finding.rule for finding in lint(rtl, parse_task(self.ZERO))}
+        self.assertIn("undeclared_clock_signal", rules)
+        self.assertIn("combinational_uses_edge", rules)
+
+    def test_data_port_used_as_a_clock_edge_is_flagged(self) -> None:
+        # Observed on the NOT gate task: `always @(posedge in)`.
+        rtl = (
+            "module TopModule (input wire in, output reg out);\n"
+            "always @(posedge in) begin out <= ~in; end\nendmodule"
+        )
+        rules = {finding.rule for finding in lint(rtl, parse_task(self.NOTGATE))}
+        self.assertIn("combinational_uses_edge", rules)
+
+    def test_correct_combinational_forms_are_clean(self) -> None:
+        for prompt, rtl in (
+            (self.ZERO, "module TopModule (output wire zero);\nassign zero = 1'b0;\nendmodule"),
+            (self.NOTGATE, "module TopModule (input wire in, output wire out);\nassign out = ~in;\nendmodule"),
+        ):
+            with self.subTest(rtl=rtl):
+                self.assertEqual(lint(rtl, parse_task(prompt)), [])
+
+    def test_identity_byte_reordering_is_flagged(self) -> None:
+        # Observed on the byte-swap task: shifted slices reassembled at their
+        # original offsets, so the output equals the input.
+        rtl = (
+            "module TopModule (input wire [31:0] in, output wire [31:0] out);\n"
+            "wire [7:0] b0, b1, b2, b3;\n"
+            "assign b0 = in[7:0];\nassign b1 = in[15:8];\n"
+            "assign b2 = in[23:16];\nassign b3 = in[31:24];\n"
+            "assign out = b3 << 24 | b2 << 16 | b1 << 8 | b0;\nendmodule"
+        )
+        rules = {finding.rule for finding in lint(rtl, parse_task(self.BYTESWAP))}
+        self.assertIn("identity_expression", rules)
+
+    def test_an_actual_reordering_is_not_flagged(self) -> None:
+        rtl = (
+            "module TopModule (input wire [31:0] in, output wire [31:0] out);\n"
+            "assign out = {in[7:0], in[15:8], in[23:16], in[31:24]};\nendmodule"
+        )
+        self.assertEqual(lint(rtl, parse_task(self.BYTESWAP)), [])
+
+    def test_sequential_task_may_use_its_own_clock(self) -> None:
+        rtl = (
+            "module TopModule (input clk, input d, output reg q);\n"
+            "always @(posedge clk) begin q <= d; end\nendmodule"
+        )
+        self.assertEqual(lint(rtl, parse_task(self.SEQ)), [])
+
+    def test_sequential_task_flagged_when_a_data_input_is_the_edge(self) -> None:
+        rtl = (
+            "module TopModule (input clk, input d, output reg q);\n"
+            "always @(posedge d) begin q <= d; end\nendmodule"
+        )
+        rules = {finding.rule for finding in lint(rtl, parse_task(self.SEQ))}
+        self.assertIn("edge_on_non_clock_signal", rules)
+
+
+class VendoredFixtureTests(unittest.TestCase):
+    """The committed VerilogEval subset must be the set the parser is checked against.
+
+    These tests do read fixture files, so they are written against tasks that are
+    deliberately tracked in git. When adding a test here, confirm the task is
+    committed - a fresh clone only has the subset listed in .gitignore.
+    """
+
+    def setUp(self) -> None:
+        self.fixtures = Path(__file__).resolve().parents[1] / "experiments" / "data" / "verilogeval" / "examples"
+
+    def test_committed_fixtures_are_complete_triples(self) -> None:
+        prompts = sorted(self.fixtures.glob("*_prompt.txt"))
+        self.assertTrue(prompts, "no vendored VerilogEval fixtures found")
+        for prompt in prompts:
+            stem = prompt.name[: -len("_prompt.txt")]
+            for suffix in ("_test.sv", "_ref.sv"):
+                with self.subTest(task=stem, suffix=suffix):
+                    self.assertTrue(
+                        (self.fixtures / f"{stem}{suffix}").is_file(),
+                        f"{stem}{suffix} is missing, so the triple is incomplete",
+                    )
+
+    def test_a_committed_task_parses_its_interface(self) -> None:
+        # Prob001_zero is tracked, and its prompt declares a single output.
+        contract = parse_task((self.fixtures / "Prob001_zero_prompt.txt").read_text(encoding="utf-8"))
+        self.assertEqual(contract.top_module, "TopModule")
+        self.assertEqual([port.name for port in contract.ports], ["zero"])
+
+
+class PromptContractTests(unittest.TestCase):
+    """The prompt must state the interface as declarations and hide failed code."""
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1]
+        self.question = self.root / "data" / "examples" / "counter" / "question.txt"
+
+    def test_port_list_is_rendered_as_declarations(self) -> None:
+        contract = parse_task(self.question.read_text(encoding="utf-8"))
+        rendered = render_port_list(contract)
+        self.assertIn("input wire clk", rendered)
+        self.assertIn("output wire [7:0] count", rendered)
+
+    def test_generation_prompt_states_the_fixed_interface(self) -> None:
+        contract = parse_task(self.question.read_text(encoding="utf-8"))
+        prompt = build_generation_prompt(contract, "some rules")
+        self.assertIn("input wire clk", prompt)
+        self.assertIn("EXACTLY the ports listed above", prompt)
+        self.assertIn("SEQUENTIAL", prompt)
+
+    def test_combinational_contract_is_told_it_is_combinational(self) -> None:
+        contract = parse_task("implement a module named TopModule\n - input in\n - output out\n")
+        self.assertIn("COMBINATIONAL", describe_sequential(contract))
+
+    def test_repair_prompt_does_not_include_the_failed_code(self) -> None:
+        # Quoting the broken module made the model reproduce it verbatim, so the
+        # code must not appear in the prompt.
+        contract = parse_task(self.question.read_text(encoding="utf-8"))
+        broken = "module counter (input clk);\n  always @(posedge clk) begin wire unique_marker_1234; end\nendmodule"
+        prompt = build_repair_prompt(contract, broken, "syntax", "ERROR: something failed", "rules")
+        self.assertNotIn("unique_marker_1234", prompt)
+
+    def test_repair_prompt_includes_only_error_lines(self) -> None:
+        contract = parse_task(self.question.read_text(encoding="utf-8"))
+        log = "INFO: chatter that should be dropped\nERROR: the real problem\nWARNING: noise"
+        prompt = build_repair_prompt(contract, "module x; endmodule", "syntax", log, "rules")
+        self.assertIn("the real problem", prompt)
+        self.assertNotIn("chatter that should be dropped", prompt)
+
+    def test_repair_prompt_carries_lint_findings(self) -> None:
+        contract = parse_task(self.question.read_text(encoding="utf-8"))
+        prompt = build_repair_prompt(
+            contract, "module x; endmodule", "syntax", "", "rules",
+            lint_findings="[combinational_uses_edge] the module must not use posedge",
+        )
+        self.assertIn("combinational_uses_edge", prompt)
+
+    def test_baseline_prompt_stays_bare(self) -> None:
+        question = "Design a D flip-flop."
+        self.assertEqual(build_baseline_prompt(question), question)
+
+
+class SubmissionLayoutTests(unittest.TestCase):
+    """The submission shape the topic guide prescribes (3.1.5.1).
+
+    These fail loudly rather than at packaging time, when the required name is
+    easy to have drifted.
+    """
+
+    REQUIRED = (
+        "Dockerfile",
+        "Dockerfile.bundled",
+        ".dockerignore",
+        "model/MODEL.md",
+        "agent",
+        "skill",
+        "serve",
+        "run.sh",
+        "run_baseline.sh",
+        "REPORT.md",
+    )
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1]
+
+    def test_every_required_submission_path_exists(self) -> None:
+        for relative in self.REQUIRED:
+            with self.subTest(path=relative):
+                self.assertTrue((self.root / relative).exists(), f"missing {relative}")
+
+    def test_shell_scripts_are_not_crlf(self) -> None:
+        # A CRLF shell script fails inside the Linux base image with "bad
+        # interpreter", so this is checked before it can reach a container.
+        scripts = sorted(self.root.glob("**/*.sh"))
+        self.assertTrue(scripts, "expected at least one shell script")
+        for script in scripts:
+            if ".git" in script.parts:
+                continue
+            with self.subTest(script=str(script.relative_to(self.root))):
+                data = script.read_bytes()
+                self.assertNotIn(b"\r\n", data, "shell script uses CRLF line endings")
+
+    def test_dockerfile_parameterises_the_base_image(self) -> None:
+        # The guide fixes the base image but has not published its name, so it
+        # must be a build argument rather than hardcoded.
+        text = (self.root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG BASE_IMAGE", text)
+        self.assertIn("FROM ${BASE_IMAGE}", text)
+
+    def test_bundled_dockerfile_copies_the_weights(self) -> None:
+        text = (self.root / "Dockerfile.bundled").read_text(encoding="utf-8")
+        self.assertIn("COPY model-weights/ /models/", text)
+        # And fails the build if nothing arrived, rather than at evaluation time.
+        self.assertIn("no weights copied", text)
+
+    def test_dockerfile_makes_the_entrypoint_executable(self) -> None:
+        # Git on Windows cannot record the executable bit, so relying on the
+        # checkout's mode would fail inside the container.
+        for name in ("Dockerfile", "Dockerfile.bundled"):
+            with self.subTest(dockerfile=name):
+                text = (self.root / name).read_text(encoding="utf-8")
+                self.assertIn("chmod +x", text)
+                self.assertIn("serve/entrypoint.sh", text)
+
+    def test_service_entrypoint_verifies_weights_before_starting(self) -> None:
+        # The sandbox is offline, so a missing model must fail immediately
+        # rather than surfacing as an evaluation-time error.
+        text = (self.root / "serve" / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn("no model weights", text)
+        self.assertIn("serve/record_service.py", text)
+
+
+class ServiceRecordingTests(unittest.TestCase):
+    """serve/record_service.py turns a server's own report into MODEL.md data."""
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "serve"))
+        import record_service  # noqa: PLC0415
+
+        self.module = record_service
+
+    def test_render_includes_the_fields_model_md_requires(self) -> None:
+        report = {
+            "host": "http://127.0.0.1:11434",
+            "server_version": "0.40.2",
+            "model": "qwen2.5-coder:1.5b",
+            "parameter_size": "1.5B",
+            "quantization": "Q4_K_M",
+            "digest": "abc123",
+            "on_disk_bytes": 986062089,
+            "resident_bytes": 1169980128,
+            "size_vram_bytes": 0,
+            "gpu_accelerated": False,
+            "model_context_length": 32768,
+            "context_length_loaded": 4096,
+            "runner": "llamacpp",
+            "driver": "unavailable",
+            "residency_note": "size_vram is 0",
+        }
+        text = self.module.render(report)
+        for expected in ("Q4_K_M", "abc123", "986.1 MB", "resident in VRAM", "context length (model)", "GPU accelerated"):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+
+    def test_a_zero_vram_reading_is_called_out(self) -> None:
+        # This is exactly what the development machine reports, and it must not
+        # be mistaken for evidence that the model fits the card.
+        report = {"model": "m", "size_vram_bytes": 0, "gpu_accelerated": False}
+        self.assertIn("resident in VRAM         : n/a", self.module.render(report))
+
+    def test_unavailable_driver_is_reported_not_hidden(self) -> None:
+        # Neither rocm-smi nor nvidia-smi exists on the development machine.
+        result = self.module._gpu_processes()
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.strip(), "the driver report must never be empty")
+
+    def test_collect_reports_an_unreachable_service_without_raising(self) -> None:
+        # Port chosen to have nothing listening on it.
+        report = self.module.collect("http://127.0.0.1:9", "nothing")
+        self.assertIn("error", report)
 
 
 class BaselinePromptTests(unittest.TestCase):
