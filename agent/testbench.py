@@ -386,13 +386,19 @@ def resolve_reference_answer(question_path: Path) -> Path | None:
     A sidecar `<question>.answer.v` sits beside the task prompt, which lets a
     mock run exercise any task instead of only the bundled counter. The
     VerilogEval `<stem>_ref.sv` form is accepted too.
+
+    The bare `answer.v` name is accepted as a last resort because the bundled
+    counter example uses it, and that is the task the documented `--mock` command
+    runs. Without it the example failed with "none found for ...question.txt",
+    so the software-only check the README describes did not work at all.
     """
     for stem in candidate_stems(question_path):
         for suffix in (".answer.v", "_ref.sv", ".ref.v"):
             candidate = question_path.with_name(stem + suffix)
             if candidate.is_file():
                 return candidate
-    return None
+    plain = question_path.with_name("answer.v")
+    return plain if plain.is_file() else None
 
 
 def resolve_testbench(

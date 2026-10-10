@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .baseline import run_baseline
 from .controller import LogicLensAgent
+from .model_client import ModelClient
 
 RESULT_FIELDS = (
     "task_id",
@@ -62,7 +63,17 @@ class EvalConfig:
     runs_dir: Path | None = None
     seed: int = 0
     limit: int | None = None
+    # One client instance is built here and handed to both the agent and the
+    # baseline. Letting each side construct its own would let them run different
+    # models or sampling settings without anything reporting it, and the gain
+    # comparison would then be meaningless.
+    model_client: ModelClient | None = None
     extra: dict = field(default_factory=dict)
+
+    def client(self) -> ModelClient:
+        if self.model_client is None:
+            self.model_client = ModelClient()
+        return self.model_client
 
 
 def discover_tasks(dataset_dir: Path) -> list[Task]:
@@ -103,6 +114,8 @@ def _run_once(config: EvalConfig, task: Task, sample: int) -> dict:
             run_dir=run_dir,
             testbench=task.testbench_path,
             testbench_mode=config.testbench_mode,
+            # The same client instance the agent side uses.
+            model_client=config.client(),
         )
     else:
         agent = LogicLensAgent(
@@ -112,6 +125,7 @@ def _run_once(config: EvalConfig, task: Task, sample: int) -> dict:
             max_attempts=config.max_attempts,
             testbench=task.testbench_path,
             testbench_mode=config.testbench_mode,
+            model_client=config.client(),
         )
         result = agent.run(task.question_path, run_dir=run_dir, source="agent")
     return result
@@ -256,6 +270,9 @@ def run_evaluation(config: EvalConfig, dataset_dir: Path, output_dir: Path | Non
     summary["max_attempts"] = config.max_attempts
     summary["mock"] = config.mock
     summary["testbench_mode"] = config.testbench_mode
+    # Recorded so the baseline and agent summaries can be compared mechanically.
+    # A gain figure is only meaningful when these agree.
+    summary["model_configuration"] = config.client().describe()
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "status.json").write_text(
         json.dumps({"completed": True, "mode": config.mode, "runs": len(rows)}, ensure_ascii=False, indent=2),
