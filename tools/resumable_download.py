@@ -23,6 +23,8 @@ CHUNK = 1024 * 1024
 # A Windows PE executable starts with "MZ"; anything else means we were served
 # something other than the installer.
 PE_MAGIC = b"MZ"
+# GitHub's release asset host rejects requests without a User-Agent.
+USER_AGENT = "LogicLens-download"
 
 
 def opener(proxy: str | None) -> urllib.request.OpenerDirector:
@@ -35,7 +37,7 @@ def opener(proxy: str | None) -> urllib.request.OpenerDirector:
 
 
 def remote_size(url: str, open_url, timeout: int) -> int | None:
-    request = urllib.request.Request(url, method="HEAD")
+    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
     try:
         with open_url(request, timeout=timeout) as response:
             length = response.headers.get("Content-Length")
@@ -55,6 +57,7 @@ def download(url: str, destination: Path, proxy: str | None, attempts: int, time
         if total and have >= total:
             break
         headers = {"Range": f"bytes={have}-"} if have else {}
+        headers["User-Agent"] = USER_AGENT
         request = urllib.request.Request(url, headers=headers)
         try:
             with open_url(request, timeout=timeout) as response:

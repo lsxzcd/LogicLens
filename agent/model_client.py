@@ -117,7 +117,7 @@ class ModelClient:
 
     # ------------------------------------------------------------------ calling
 
-    def _payload(self, prompt: str) -> dict:
+    def _payload(self, prompt: str, attempt: int = 1) -> dict:
         payload = {
             "model": self.model,
             "messages": [
@@ -129,21 +129,29 @@ class ModelClient:
             "max_tokens": self.max_tokens,
         }
         if self.seed is not None:
-            payload["seed"] = self.seed
+            # Offset per attempt so a repair can differ from the attempt it is
+            # fixing, while the run as a whole stays reproducible.
+            payload["seed"] = self.seed + max(0, attempt - 1)
         return payload
 
-    def generate(self, prompt: str, temperature: float | None = None) -> str:
+    def generate(self, prompt: str, temperature: float | None = None, attempt: int = 1) -> str:
         """Send one chat request and return the assistant message content.
 
-        Retries only cover transport failures and 5xx responses. A 4xx is
-        returned immediately: retrying a malformed request or a bad model name
-        cannot help, and it would multiply the wall clock during a batch run.
+        `attempt` varies the seed per repair round. With a fixed seed the local
+        server is fully deterministic - raising the temperature does not change
+        that - so resending a similar prompt returned byte-identical code and
+        every retry was wasted. Offsetting the seed keeps a whole run
+        reproducible while letting a repair actually produce something new.
+
+        Retries cover transport failures and 5xx responses. A 4xx is returned
+        immediately: retrying a malformed request or a bad model name cannot
+        help, and it would multiply the wall clock during a batch run.
         """
         if not self.url:
             raise ModelConfigError(
                 "No model endpoint configured. Set LOGICLENS_MODEL_URL, pass --model-url, or use --mock."
             )
-        payload = self._payload(prompt)
+        payload = self._payload(prompt, attempt=attempt)
         if temperature is not None:
             payload["temperature"] = temperature
         body = json.dumps(payload).encode("utf-8")

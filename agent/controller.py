@@ -9,6 +9,7 @@ from .candidate_ranker import score_result, synthesis_credit
 from .error_classifier import classify_error, failed_stage, load_patterns
 from .model_client import ModelClient, extract_verilog
 from .repair_policy import NON_REPAIRABLE, build_generation_prompt, build_repair_prompt
+from .rtl_lint import lint, render_findings
 from .task_parser import parse_task
 from .testbench import resolve_reference_answer, resolve_testbench
 from .vivado_runner import run_vivado_flow
@@ -56,7 +57,7 @@ class LogicLensAgent:
             current_code = reference.read_text(encoding="utf-8")
         else:
             prompt = build_generation_prompt(contract, skill_text)
-            current_code = extract_verilog(self.client.generate(prompt))
+            current_code = extract_verilog(self.client.generate(prompt, attempt=1))
 
         # The testbench is resolved once per task, then reused for every attempt
         # so a repair is graded against exactly the same checker.
@@ -87,6 +88,14 @@ class LogicLensAgent:
             rtl_path = attempt_dir / f"{dut_module}.v"
             rtl_path.write_text(current_code, encoding="utf-8")
             shutil.copyfile(question_path, attempt_dir / "question.txt")
+
+            # Structural checks run before any tool is invoked, so a candidate
+            # with a fatal shape is not sent through compilation and
+            # simulation just to discover it. Findings also give the next
+            # attempt a concrete, named defect to fix.
+            findings = lint(current_code, contract)
+            static_findings = render_findings(findings)
+
             flow = run_vivado_flow(
                 self.project_root,
                 rtl_path,
@@ -104,12 +113,21 @@ class LogicLensAgent:
                 and synthesis_credit(flow)
                 and flow.get("timing_constraint_pass", True)
             )
+            # Findings are recorded but never override a tool verdict: the
+            # structural rules are heuristics, and the official testbench is the
+            # authority on correctness. Their value is in the repair prompt.
             error_type = (
                 "none"
                 if verified
                 else classify_error(flow.get("log", ""), self.patterns, stage=failed_stage(flow))
             )
-            record = {"attempt": attempt, "error_type": error_type, "failed_stage": failed_stage(flow), **flow}
+            record = {
+                "attempt": attempt,
+                "error_type": error_type,
+                "failed_stage": failed_stage(flow),
+                "lint_findings": [f.render() for f in findings],
+                **flow,
+            }
             history.append(record)
             current_score = score_result(flow, attempt)
             if current_score > best_score:
@@ -123,8 +141,17 @@ class LogicLensAgent:
                 stopped_reason = error_type
                 break
             if attempt < self.max_attempts and not self.mock:
-                repair_prompt = build_repair_prompt(contract, current_code, error_type, flow.get("log", ""), skill_text)
-                current_code = extract_verilog(self.client.generate(repair_prompt))
+                repair_prompt = build_repair_prompt(
+                    contract,
+                    current_code,
+                    error_type,
+                    flow.get("log", ""),
+                    skill_text,
+                    lint_findings=static_findings,
+                )
+                # attempt+1 offsets the seed so this repair differs from the
+                # attempt it is fixing instead of reproducing it byte for byte.
+                current_code = extract_verilog(self.client.generate(repair_prompt, attempt=attempt + 1))
 
         if best is None:
             best = {
