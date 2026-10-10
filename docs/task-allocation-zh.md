@@ -42,6 +42,17 @@
 
 ## 三、详细任务书
 
+**→ 三份可直接转发给队友的任务书在 [`docs/tasks/`](tasks/README-zh.md)：**
+
+| 队友 | 任务书 |
+|---|---|
+| A | [task-A-dataset-skills-zh.md](tasks/task-A-dataset-skills-zh.md) |
+| B | [task-B-agent-quality-zh.md](tasks/task-B-agent-quality-zh.md) |
+| C | [task-C-deployment-zh.md](tasks/task-C-deployment-zh.md) |
+
+每份都**自带背景说明、环境准备、完整命令与预期输出、验收标准、边界清单**，
+不需要额外口头解释上下文。下面是小节摘要，细节看任务书。
+
 ### 角色 A：数据集与技能包
 
 **目标**：让评测集更全面，让技能包从"5 道题的 6 张卡"扩到"全量数据支撑的完整技能库"。
