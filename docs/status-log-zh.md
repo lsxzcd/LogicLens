@@ -264,10 +264,17 @@ python3 experiments/p05_verify.py        # 期望 3 cases, 0 failed, 0 env-block
 
 ### 5.4 分工方案
 
-**→ 见 [`docs/task-allocation-zh.md`](task-allocation-zh.md)**
+**→ 总览：[`docs/task-allocation-zh.md`](task-allocation-zh.md)**
 
-三条独立主线（数据集与技能包 / 智能体质量 / 部署与容器）+ 一名集成协调，
-含**文件归属表**（避免互相踩踏）、优先级排序和验收标准。
+**→ 可直接转发给队友的任务书：[`docs/tasks/`](tasks/README-zh.md)**
+
+| 队友 | 任务书 | 方向 | 需要显卡 |
+|---|---|---|---|
+| A | [task-A-dataset-skills-zh.md](tasks/task-A-dataset-skills-zh.md) | 数据集与技能包 | 部分 |
+| B | [task-B-agent-quality-zh.md](tasks/task-B-agent-quality-zh.md) | 智能体质量 | ❌ 本机即可 |
+| C | [task-C-deployment-zh.md](tasks/task-C-deployment-zh.md) | 部署与容器（实验室机器） | ✅ |
+
+三份任务书**各自独立、自带背景说明**，可直接转发，无需额外口头解释。
 
 **当前唯一阻塞点**：实验室机器的环境勘察（显卡型号/显存/ROCm），其余工作都可立即并行。
 
