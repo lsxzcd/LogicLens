@@ -213,8 +213,11 @@ py -3 eval.py --dataset experiments\data\verilogeval --mode agent --limit 5 --sa
 | 17 | **修复提示词展示失败代码造成锚定** | 模型逐字照抄错误结构，3 次重试全部浪费（对照实验：展示 3/3 含错误结构，不展示 0/3） | ✅ |
 | 18 | **新测试依赖未提交的 fixture 文件** | 本机（有全量 156 道导出）通过，**CI 干净克隆 `FileNotFoundError`，3 个检查全挂** | ✅ |
 | 19 | 容器入口脚本无可执行位 | Windows 上 git 无法记录可执行位，容器里 `Permission denied` | ✅ |
+| 20 | **基线无法接受模型参数** | `run_baseline.py` 没有 `--model-url`/`--model`/`--seed`；**两侧模型不同 → 增益数据完全不可信**（权重最高 40 分的那项） | ✅ |
+| 21 | **评测时基线与智能体各建客户端** | 两处独立 `ModelClient()`，只要环境变量有差异就**无声不公平** | ✅ |
+| 22 | `--mock` 在自带示例上不可用 | `resolve_reference_answer` 不认 `answer.v`，README 里那条命令**在唯一该跑通的题上直接失败** | ✅ |
 
-**第 8、16、17、18 项最隐蔽**——都不会在本地报错，只会让通过率莫名偏低或让 CI 失败。
+**第 8、16、17、18、20、21 项最隐蔽**——都不会在本地报错，只会让通过率莫名偏低、让 CI 失败，或让增益数据不可信。
 
 ---
 
@@ -258,6 +261,15 @@ python3 experiments/p05_verify.py        # 期望 3 cases, 0 failed, 0 env-block
 1. 测试台只经 `agent/testbench.py::resolve_testbench`
 2. 契约字段只经 `TaskContract`，新增必须向后兼容
 3. 判定口径只在 `vivado/run_flow.tcl` 决定，改语义必须同步更新字段表
+
+### 5.4 分工方案
+
+**→ 见 [`docs/task-allocation-zh.md`](task-allocation-zh.md)**
+
+三条独立主线（数据集与技能包 / 智能体质量 / 部署与容器）+ 一名集成协调，
+含**文件归属表**（避免互相踩踏）、优先级排序和验收标准。
+
+**当前唯一阻塞点**：实验室机器的环境勘察（显卡型号/显存/ROCm），其余工作都可立即并行。
 
 ---
 
