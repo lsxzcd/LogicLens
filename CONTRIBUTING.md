@@ -54,6 +54,39 @@ py -3 experiments\tb_verify.py     # 生成的 testbench 必须能拒错误设�
 - 不要把本机的绝对路径、模型权重、日志或 `dfx_runtime.txt` 提进仓库。
 - `--mock` 的结果**只能**用于软件流程自检，**禁止**写入 `REPORT.md` 的实验结果。
 
+### ⚠️ 测试不得依赖未提交的文件
+
+**这一条踩过坑，请务必遵守。** VerilogEval 全量导出（156 道题）**不在仓库里**——
+仓库只跟踪 7 道代表性题目（见 `.gitignore` 的例外规则）。因为导出用一条命令即可重建：
+
+```powershell
+py -3 tools/fetch_verilogeval_problem.py --all experiments\data\verilogeval
+```
+
+后果：如果一个测试读取了某道**未提交**的题目，它在"有全量导出的本机"通过，
+却在**干净克隆和 CI 上直接 FileNotFoundError**。
+
+**正确做法（二选一）：**
+
+1. **测试自带数据**——把题目文本直接写在测试里（推荐，见 `StructuralLintTests`）
+2. **若必须读 fixture**，用已提交题目的同时**加跳过保护**，见 `VerilogEvalAdapterTests`：
+
+```python
+if not self.prompt.is_file():
+    self.skipTest("VerilogEval fixture not present; run tools/fetch_verilogeval_problem.py")
+```
+
+**提交前请用干净克隆自检**，这是唯一能发现此类问题的方法：
+
+```cmd
+git clone --branch <你的分支> --single-branch https://github.com/lsxzcd/LogicLens.git D:\tmp\ci_repro
+cd /d D:\tmp\ci_repro
+py -3 -m unittest discover -s tests
+```
+
+已提交的 7 道题：`Prob001_zero`、`Prob090_circuit1`、`Prob100_fsm3comb`、
+`Prob104_mt2015_muxdff`、`Prob120_fsm3s`、`Prob131_mt2015_q4`、`Prob156_review2015_fancytimer`。
+
 ---
 
 ## 3. 架构与扩展点
