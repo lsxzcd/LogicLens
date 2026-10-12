@@ -216,16 +216,60 @@ INFO: [Synth 8-6155] done synthesizing module 'counter'      ← 最后一行，
 | TCL 流程 | `vivado/run_flow.tcl` | **同一份文件** |
 | **结果** | 🔴 崩溃 | ✅ **成功，`synthesis_pass=1`，110 秒** |
 
+**成功日志的完整尾部**（开发机 `experiments/runs/.../vivado.log`）：
+
+```
+INFO: [Synth 8-6157] synthesizing module 'TopModule'
+INFO: [Synth 8-6155] done synthesizing module 'TopModule' (0#1)
+WARNING: [Synth 8-3330] design TopModule has an empty top module
+INFO: [Synth 8-6742] Reading net delay rules and data               ← ★ 崩溃那台没有这一行
+Synthesis finished with 0 errors, 0 critical warnings and 4 warnings.
+13 Infos, 4 Warnings, 0 Critical Warnings and 0 Errors encountered.
+synth_design completed successfully
+synth_design: Time (s): cpu = 00:00:17 ; elapsed = 00:00:27 . Memory (MB): peak = 2220.332
+```
+
+**对照结论**：崩溃那台**停在 `done synthesizing module`**，
+**缺少从 `Reading net delay rules and data` 开始的全部后续阶段**。
+
 **这一个对照排除了四种可能**：
 
 | 排除的假设 | 依据 |
 |---|---|
 | ❌ 我们的 TCL 流程有 bug | 同一份脚本另一边成功 |
 | ❌ 目标器件不支持 | 同一器件成功 |
-| ❌ 缺 Synthesis 许可证 | 日志明确 `Got license for feature 'Synthesis' and/or device 'xczu3eg'` |
-| ❌ 内存不足 | **综合峰值内存仅 1764 MB**（日志有记录），机器有 13.7 GB 可用 |
+| ❌ 缺 Synthesis 许可证 | 两边日志都明确 `Got license for feature 'Synthesis'` |
+| ❌ 内存不足 | **成功那台峰值仅 2220 MB / 崩溃那台 1764 MB**，而机器有 13.7 GB 可用 |
 
 **结论：这是实验室那台机器的环境问题，不是我们的代码问题。**
+
+### 5.3.1 GUI 对照测试（C 于 2026-10-12 完成）
+
+**这项测试排除的变量很重要：它证明崩溃不是我们的 Python 调用方式造成的。**
+
+C 用 **Vivado 图形界面**（新建工程向导 + GUI 按钮，**完全没用终端或 Tcl**）跑同一个最小案例：
+
+| 项目 | 结果 |
+|---|---|
+| 工程 | `E:\LogicLens_GUI_20261012_0811` |
+| 器件 / 顶层 | `xczu3eg-sbva484-1-e` / `alu_comb` |
+| **行为仿真** | ✅ **通过**：`TEST_PASS`、`$finish called at time: 2 ns`、`XSIM Completed` |
+| **综合** | 🔴 **失败**：`Synthesis Failed`，`synth_1` 状态 `synth_design ERROR` |
+| 日志位置 | `...\LogicLens_GUI_20261012_0811.runs\synth_1\runme.log` |
+| 日志尾部 | **同样停在 `done synthesizing module`**，`maximum of 2 processes`、`helper PID 14876` |
+| GUI 默认 jobs | 对话框显示 `Number of jobs=8`（**与后台 `general.maxThreads` 不等同**） |
+
+**这项测试的价值**：
+
+| 证明了什么 | 说明 |
+|---|---|
+| ✅ **不是我们的 Python/批处理调用方式的问题** | GUI 模式同样崩溃 |
+| ✅ **仿真链路在 GUI 下也正常** | 进一步确认编译/仿真可用 |
+| ⚠️ 仍是"对照诊断，不是完全单变量实验" | GUI/项目模式与批处理存在运行配置差异（C 自己指出，很准确） |
+
+**C 未取得子进程退出码**，所以**不能声称已确认是同一个 `0xC0000374`**（他如实标注了这一点）。
+
+**待读的证据**：运行目录里的 **`.vivado.error.rst`**（C 观察到但未读内容），可能包含更具体的失败信息。
 
 ### 5.4 两个待查方向
 
