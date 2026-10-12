@@ -15,7 +15,17 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=1, help="Independent attempts per task (5 gives pass@5)")
     parser.add_argument("--max-attempts", type=int, default=3, help="Repair attempts per sample in agent mode")
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N tasks (smoke runs)")
-    parser.add_argument("--seed", type=int, default=0, help="Shuffle seed for task ordering")
+    # Named for what it does. It was previously `--seed`, which collided with the
+    # shared model `--seed` and made the whole command fail to parse with
+    # "conflicting option string: --seed"; worse, the shared helper then read this
+    # shuffle value as the model sampling seed, two unrelated settings sharing
+    # one name.
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=0,
+        help="Seed for shuffling task order (NOT the model sampling seed)",
+    )
     parser.add_argument("--vivado", default=None)
     parser.add_argument("--mock", action="store_true", help="Software-only check; never report these numbers")
     parser.add_argument(
@@ -51,7 +61,7 @@ def main() -> int:
             mock=args.mock,
             testbench_mode=args.testbench_mode,
             runs_dir=runs_dir,
-            seed=args.seed,
+            seed=args.shuffle_seed,
             limit=args.limit,
             model_client=client,
         )

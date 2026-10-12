@@ -24,7 +24,7 @@ from agent.repair_policy import (
     describe_sequential,
     render_port_list,
 )
-from agent.rtl_lint import lint
+from agent.rtl_lint import lint, rewrite_combinational
 from agent.task_parser import parse_task, ports_from_rtl, width_from_bracket
 from agent.testbench import (
     candidate_stems,
@@ -62,6 +62,33 @@ class ErrorClassifierTests(unittest.TestCase):
     def test_classifies_timing_error(self) -> None:
         patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
         self.assertEqual(classify_error("WARNING: unconstrained path remains", patterns), "timing")
+
+    def test_a_dangling_else_is_its_own_category(self) -> None:
+        """Real log from Prob017, where the model wrote `end` before `else`.
+
+        The `syntax` category also lists "used in incorrect context", so this only
+        classifies correctly while `dangling_else` is checked first. The order of
+        the keys in error_patterns.json is therefore load-bearing.
+        """
+        patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
+        log = (
+            "ERROR: [VRFC 10-4982] syntax error near 'else' [TopModule.v:10]\n"
+            "ERROR: [VRFC 10-8549] SystemVerilog keyword 'else' used in incorrect context [TopModule.v:10]"
+        )
+        self.assertEqual(classify_error(log, patterns, stage="compile"), "dangling_else")
+
+    def test_a_wire_driven_procedurally_is_its_own_category(self) -> None:
+        """Real log from Prob006, which the classifier previously called unknown."""
+        patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
+        log = (
+            "ERROR: [VRFC 10-1280] procedural assignment to a non-register out is not permitted, "
+            "left-hand side should be reg/integer/time/genvar [TopModule.v:6]"
+        )
+        self.assertEqual(classify_error(log, patterns, stage="compile"), "procedural_assignment_to_wire")
+
+    def test_a_plain_syntax_error_still_classifies_as_syntax(self) -> None:
+        patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
+        self.assertEqual(classify_error("ERROR: syntax error near ';'", patterns, stage="compile"), "syntax")
 
 
 class StageAwareClassificationTests(unittest.TestCase):
@@ -838,6 +865,134 @@ class VendoredFixtureTests(unittest.TestCase):
         self.assertEqual([port.name for port in contract.ports], ["zero"])
 
 
+class CombinationalRewriteTests(unittest.TestCase):
+    """A mechanical rewrite that must never damage a correct design.
+
+    The rewrite exists because the linter reported an edge-triggered block in a
+    clockless task on 39 attempts and the model still produced it on every repair
+    round. Because it edits code rather than reporting on it, the bar for these
+    tests is that a sequential design and an already-correct design come out
+    byte-identical.
+    """
+
+    GATE = "implement a module named TopModule with the following interface.\n - input a\n - input b\n - output out\n"
+    SEQ = "implement a module named TopModule with the following interface.\n - input clk\n - input d\n - output q\n"
+    VEC = "implement a module named TopModule with the following interface.\n - input [7:0] in\n - output [7:0] out\n"
+
+    def test_edge_block_on_a_clockless_task_becomes_combinational(self) -> None:
+        # Measured on the AND gate task.
+        rtl = (
+            "module TopModule (input wire a, input wire b, output reg out);\n"
+            "always @(posedge a or posedge b) begin\n    out <= a & b;\nend\nendmodule"
+        )
+        fixed = rewrite_combinational(rtl, parse_task(self.GATE))
+        self.assertIn("always @(*)", fixed)
+        self.assertNotIn("posedge", fixed)
+        self.assertNotIn("<=", fixed)
+        self.assertIn("out = a & b;", fixed)
+
+    def test_the_expression_is_not_reordered(self) -> None:
+        # `~a & ~b` is NOR. Rewriting it to `~(a | b)` would be equivalent but
+        # would be this function making a semantic decision it should not make.
+        rtl = (
+            "module TopModule (input wire a, input wire b, output reg out);\n"
+            "always @(posedge a or posedge b) begin\n    out <= ~a & ~b;\nend\nendmodule"
+        )
+        fixed = rewrite_combinational(rtl, parse_task(self.GATE))
+        self.assertIn("out = ~a & ~b;", fixed)
+
+    def test_a_sequential_design_is_left_untouched(self) -> None:
+        # The clock port is present, so the design is sequential and the rewrite
+        # must not touch it.
+        rtl = (
+            "module TopModule (input clk, input d, output reg q);\n"
+            "always @(posedge clk) begin\n    q <= d;\nend\nendmodule"
+        )
+        self.assertEqual(rewrite_combinational(rtl, parse_task(self.SEQ)), rtl)
+
+    def test_an_already_correct_design_is_left_untouched(self) -> None:
+        rtl = "module TopModule (input wire a, input wire b, output wire out);\nassign out = a & b;\nendmodule"
+        self.assertEqual(rewrite_combinational(rtl, parse_task(self.GATE)), rtl)
+
+    def test_a_block_with_begin_end_is_rewritten(self) -> None:
+        rtl = (
+            "module TopModule (input wire a, input wire b, output reg out);\n"
+            "always @(posedge a) begin\n    if (a) out <= b;\n    else out <= 1'b0;\nend\nendmodule"
+        )
+        fixed = rewrite_combinational(rtl, parse_task(self.GATE))
+        self.assertIn("always @(*)", fixed)
+        self.assertIn("out = b;", fixed)
+        self.assertIn("out = 1'b0;", fixed)
+
+    def test_the_rewrite_clears_the_finding_it_targets(self) -> None:
+        # The point of the rewrite is that the linter then has nothing to say.
+        rtl = (
+            "module TopModule (input wire a, input wire b, output reg out);\n"
+            "always @(posedge a or posedge b) begin\n    out <= a & b;\nend\nendmodule"
+        )
+        contract = parse_task(self.GATE)
+        self.assertTrue(lint(rtl, contract), "the original should be reported")
+        self.assertEqual(lint(rewrite_combinational(rtl, contract), contract), [])
+
+    def test_empty_input_is_returned_unchanged(self) -> None:
+        self.assertEqual(rewrite_combinational("", parse_task(self.GATE)), "")
+
+    def test_an_undeclared_clock_is_also_rewritten(self) -> None:
+        # The other measured shape: `always @(posedge clk)` in a module whose port
+        # list has no clk at all, which fails to compile.
+        rtl = "module TopModule (output wire zero);\nalways @(posedge clk) begin zero <= 1'b0; end\nendmodule"
+        fixed = rewrite_combinational(rtl, parse_task("implement a module named TopModule\n - output zero\n"))
+        self.assertIn("always @(*)", fixed)
+        self.assertNotIn("clk", fixed)
+
+    def test_a_wire_driven_procedurally_becomes_reg(self) -> None:
+        # Measured on the vector-reversal task: `output wire out` driven from an
+        # always block is `procedural assignment to a non-register out is not
+        # permitted`. This was every remaining unknown compile failure once the
+        # edge sensitivity alone had been fixed.
+        rtl = (
+            "module TopModule (\n    input wire [7:0] in,\n    output wire [7:0] out\n);\n"
+            "    always @(posedge in) begin\n        out <= ~in;\n    end\nendmodule"
+        )
+        fixed = rewrite_combinational(rtl, parse_task(self.VEC))
+        self.assertIn("output reg [7:0] out", fixed)
+        self.assertIn("always @(*)", fixed)
+        self.assertNotIn("<= ", fixed)
+
+    def test_a_sequential_design_only_has_the_keyword_fixed(self) -> None:
+        # The clock port is present so the edge sensitivity must stay; only the
+        # declaration keyword is wrong.
+        rtl = "module TopModule (input clk, input d, output wire q);\nalways @(posedge clk) begin\n    q <= d;\nend\nendmodule"
+        fixed = rewrite_combinational(rtl, parse_task(self.SEQ))
+        self.assertIn("output reg q", fixed)
+        self.assertIn("posedge clk", fixed)
+        self.assertIn("q <= d;", fixed)
+
+    def test_a_wire_only_port_list_is_untouched(self) -> None:
+        # Nothing is assigned procedurally, so no keyword changes.
+        rtl = "module TopModule (input wire a, input wire b, output wire out);\nassign out = a & b;\nendmodule"
+        self.assertEqual(rewrite_combinational(rtl, parse_task(self.GATE)), rtl)
+
+    def test_an_already_reg_output_is_untouched(self) -> None:
+        rtl = "module TopModule (input wire a, input wire b, output reg out);\nalways @(*) begin\n    out = a & b;\nend\nendmodule"
+        self.assertEqual(rewrite_combinational(rtl, parse_task(self.GATE)), rtl)
+
+    def test_a_comparison_is_not_mistaken_for_an_assignment(self) -> None:
+        # `a == b` must not look like an assignment to `a`.
+        from agent.rtl_lint import _signals_assigned_in_always  # noqa: PLC0415
+
+        rtl = "module m (input a, input b, output reg y);\nalways @(*) begin\n    y = (a == b);\nend\nendmodule"
+        self.assertEqual(_signals_assigned_in_always(rtl), {"y"})
+
+    def test_a_nonblocking_assignment_is_detected(self) -> None:
+        # The lookbehind that used to guard the operator silently rejected `<=`,
+        # which is why the first version of this rewrite changed nothing here.
+        from agent.rtl_lint import _signals_assigned_in_always  # noqa: PLC0415
+
+        rtl = "module m (input clk, input d, output q);\nalways @(posedge clk) begin\n    q <= d;\nend\nendmodule"
+        self.assertEqual(_signals_assigned_in_always(rtl), {"q"})
+
+
 class PromptContractTests(unittest.TestCase):
     """The prompt must state the interface as declarations and hide failed code."""
 
@@ -1059,6 +1214,48 @@ class FairnessTests(unittest.TestCase):
                 source = (root / name).read_text(encoding="utf-8")
                 self.assertIn("add_model_arguments", source)
                 self.assertIn("client_from_args", source)
+
+    def test_no_entry_point_defines_an_option_twice(self) -> None:
+        """Build each parser and look for a duplicate option string.
+
+        The check above only greps the source for the shared helper, which is why
+        it passed while eval.py could not run at all: eval.py declared `--seed`
+        for task shuffling while the shared model group declared `--seed` for
+        sampling, and argparse raised only at parse time. Building the parser is
+        what catches that.
+        """
+        import argparse  # noqa: PLC0415
+        import importlib  # noqa: PLC0415
+        import inspect  # noqa: PLC0415
+
+        from agent.cli import add_model_arguments  # noqa: PLC0415
+
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root))
+        for name in ("run", "run_baseline", "eval"):
+            with self.subTest(script=name):
+                module = importlib.import_module(name)
+                parser = argparse.ArgumentParser(prog=name)
+                if "add_model_arguments" in inspect.getsource(module.main):
+                    add_model_arguments(parser)
+                seen: set[str] = set()
+                colliding = []
+                for action in parser._actions:
+                    for option in action.option_strings:
+                        if option in seen:
+                            colliding.append(option)
+                        seen.add(option)
+                self.assertEqual(colliding, [], f"{name} defines these options twice: {colliding}")
+
+    def test_eval_separates_the_shuffle_seed_from_the_model_seed(self) -> None:
+        """Two unrelated settings must not share a flag name.
+
+        Reading the shuffle seed as the model sampling seed would silently make
+        every batch run's sampling depend on the task ordering.
+        """
+        source = (Path(__file__).resolve().parents[1] / "eval.py").read_text(encoding="utf-8")
+        self.assertIn("--shuffle-seed", source)
+        self.assertNotIn('add_argument("--seed"', source)
 
     def test_baseline_accepts_a_caller_supplied_client(self) -> None:
         # The signature is the guarantee: without this parameter the baseline

@@ -205,6 +205,133 @@ def lint(rtl: str, contract: TaskContract) -> list[Finding]:
     return findings
 
 
+# An always block whose sensitivity is entirely edge-based.
+_EDGE_BLOCK_RE = re.compile(
+    r"always\s*@\s*\(\s*(?P<sensitivity>(?:pos|neg)edge\s+[A-Za-z_]\w*\s*(?:or\s+(?:pos|neg)edge\s+[A-Za-z_]\w*\s*)*)\)"
+    r"(?P<body>\s*(?:begin\b.*?end\b|(?:(?!\bend\b).)*;))",
+    re.S | re.I,
+)
+
+_ALWAYS_RE = re.compile(r"always\s*@\s*\([^)]*\)\s*(?P<body>begin\b.*?\bend\b|(?:(?!\bbegin\b).)*?;)", re.S)
+# An assignment to a simple name, taking the rightmost identifier before the
+# operator. Branching on whether an identifier follows handles both operators
+# without the lookbehind that was silently rejecting `<=`.
+_PROCEDURAL_ASSIGN_RE = re.compile(
+    r"(?:(?P<before>[A-Za-z_]\w*)\s*)?(?P<op><=|=)(?!=)\s*(?P<after>[A-Za-z_]\w*)?"
+)
+
+
+def _assigned_name(match: re.Match) -> str | None:
+    """Which signal an assignment target names, or None if this is not one.
+
+    `before` is the rightmost identifier before the operator, which is the target
+    in `q <= d`, `out = a & b` and `sum_reg = x + y`. When there is no identifier
+    before the operator it is a comparison inside an expression (`a == b`), so the
+    token after it is not a target.
+    """
+    if match.group("before"):
+        return match.group("before")
+    return None
+
+
+def _signals_assigned_in_always(rtl: str) -> set[str]:
+    """Names that receive a procedural assignment inside an always block.
+
+    In Verilog the left-hand side of a procedural assignment must be a variable,
+    so anything in this set has to be declared `reg` (or `logic`), never `wire`.
+    """
+    names: set[str] = set()
+    for block in _ALWAYS_RE.finditer(rtl):
+        for match in _PROCEDURAL_ASSIGN_RE.finditer(block.group("body")):
+            name = _assigned_name(match)
+            if name:
+                names.add(name)
+    return names
+
+
+def declare_procedural_outputs(rtl: str) -> str:
+    """Turn `output wire x` into `output reg x` when x is assigned procedurally.
+
+    Measured on the vector-reversal and mux tasks: the model declares
+    `output wire out` and then drives it from an always block, which is a type
+    error - `procedural assignment to a non-register out is not permitted`. It
+    was the cause of every remaining `unknown` compile failure once the edge
+    sensitivity had been dealt with.
+
+    This is again a mechanical fact rather than a guess: a name assigned inside an
+    always block must be a variable, so `wire` is simply the wrong keyword there.
+    Only the keyword changes; the port name, direction, width and order are left
+    exactly as written, and a port that is not assigned procedurally is untouched.
+    """
+    if not rtl:
+        return rtl
+    procedural = _signals_assigned_in_always(rtl)
+    if not procedural:
+        return rtl
+
+    def fix(match: re.Match) -> str:
+        name = match.group("name")
+        if name not in procedural:
+            return match.group(0)
+        # Keep everything except the `wire` keyword, which becomes `reg`.
+        return match.group("head") + "reg" + match.group("tail")
+
+    port_pattern = re.compile(
+        r"(?P<head>\boutput\b\s+)wire(?P<tail>\s*(?:\[[^\]]*\])?\s*(?P<name>[A-Za-z_]\w*))",
+        re.I,
+    )
+    return port_pattern.sub(fix, rtl)
+
+
+def rewrite_combinational(rtl: str, contract: TaskContract) -> str:
+    """Repair the shapes that follow mechanically from the contract.
+
+    This addresses the most common failures measured on the VerilogEval set with a
+    small local model. Two shapes were observed, and both were reported correctly
+    by the linter while the model reproduced them on every repair round:
+
+    1. A purely combinational task answered with
+       `always @(posedge a or posedge b)`. This was reported on 39 attempts.
+    2. An output declared `wire` but driven from an always block, which does not
+       compile. Fixing only (1) left ten `unknown` compile failures behind.
+
+    Both are mechanical, not guesses. If the contract declares no clock port then
+    the design is combinational by definition, and an edge sensitivity on a data
+    input cannot be what the task wants; and a signal assigned inside an always
+    block must be a variable, so `wire` is simply the wrong keyword. The rewrite
+    therefore:
+
+    * replaces the edge sensitivity with `@(*)`;
+    * replaces non-blocking `<=` with blocking `=` inside that block;
+    * changes `output wire` to `output reg` for signals assigned procedurally,
+      whether or not an edge block was rewritten.
+
+    Nothing else is touched: not port names, directions, widths or order, not the
+    expressions, and not other blocks. A contract that declares a clock is
+    returned from the edge rewrite unchanged, so a sequential design can never be
+    altered by that part.
+    """
+    if not rtl:
+        return rtl
+
+    declared = declared_ports(rtl)
+    result = rtl
+
+    if contract.clock_spec.name not in declared:
+        def replace(match: re.Match) -> str:
+            body = match.group("body")
+            # Only the assignment operator changes; expressions keep their order
+            # and parentheses exactly as written.
+            body = re.sub(r"<=", "=", body)
+            return f"always @(*){body}"
+
+        result = _EDGE_BLOCK_RE.sub(replace, result)
+
+    # Applies regardless of whether an edge block was rewritten, because the two
+    # defects are independent.
+    return declare_procedural_outputs(result)
+
+
 def render_findings(findings: list[Finding]) -> str:
     if not findings:
         return ""
