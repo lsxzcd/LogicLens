@@ -1060,6 +1060,48 @@ class FairnessTests(unittest.TestCase):
                 self.assertIn("add_model_arguments", source)
                 self.assertIn("client_from_args", source)
 
+    def test_no_entry_point_defines_an_option_twice(self) -> None:
+        """Build each parser and look for a duplicate option string.
+
+        The check above only greps the source for the shared helper, which is why
+        it passed while eval.py could not run at all: eval.py declared `--seed`
+        for task shuffling while the shared model group declared `--seed` for
+        sampling, and argparse raised only at parse time. Building the parser is
+        what catches that.
+        """
+        import argparse  # noqa: PLC0415
+        import importlib  # noqa: PLC0415
+        import inspect  # noqa: PLC0415
+
+        from agent.cli import add_model_arguments  # noqa: PLC0415
+
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root))
+        for name in ("run", "run_baseline", "eval"):
+            with self.subTest(script=name):
+                module = importlib.import_module(name)
+                parser = argparse.ArgumentParser(prog=name)
+                if "add_model_arguments" in inspect.getsource(module.main):
+                    add_model_arguments(parser)
+                seen: set[str] = set()
+                colliding = []
+                for action in parser._actions:
+                    for option in action.option_strings:
+                        if option in seen:
+                            colliding.append(option)
+                        seen.add(option)
+                self.assertEqual(colliding, [], f"{name} defines these options twice: {colliding}")
+
+    def test_eval_separates_the_shuffle_seed_from_the_model_seed(self) -> None:
+        """Two unrelated settings must not share a flag name.
+
+        Reading the shuffle seed as the model sampling seed would silently make
+        every batch run's sampling depend on the task ordering.
+        """
+        source = (Path(__file__).resolve().parents[1] / "eval.py").read_text(encoding="utf-8")
+        self.assertIn("--shuffle-seed", source)
+        self.assertNotIn('add_argument("--seed"', source)
+
     def test_baseline_accepts_a_caller_supplied_client(self) -> None:
         # The signature is the guarantee: without this parameter the baseline
         # would build its own client and silently ignore the caller's settings.
