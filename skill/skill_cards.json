@@ -67,12 +67,34 @@
       "title": "A 1.5B model may not remove the invented clock even when told exactly why",
       "source_failure": "On Prob002_m2014_q4i the model still emitted `always @(posedge clk)` after three attempts, each carrying both lint findings and the compile error `'clk' is not declared`.",
       "observed_evidence": "lint_findings recorded on all three attempts: undeclared_clock_signal and combinational_uses_edge. The generated file was unchanged in shape.",
-      "rule": "Recorded as a known model limitation rather than a prompt defect. Re-test with the 7B+ model on the AMD machine before adding further prompt machinery.",
+      "rule": "Addressed by the mechanical repair below rather than by more prompt machinery. Reconciled on 2026-10-12: the same defect measured over 20 tasks reproduced on every repair round, and the agent now rewrites the code instead of asking again.",
+      "enforced_by": ["agent/rtl_lint.py: rewrite_combinational"],
+      "measured_effect": "was 1 of 5 tasks failing on this pattern; after the rewrite the pattern no longer appears in any attempt",
+      "validated_on": 20,
+      "status": "resolved-by-mechanical-repair"
+    },
+    {
+      "id": "mechanical-repair-over-reporting",
+      "title": "When the defect is decidable from the contract, rewrite the code instead of asking the model again",
+      "source_failure": "Over 20 VerilogEval tasks the linter named `combinational_uses_edge` on 39 attempts, and the model reproduced the same edge-triggered block on all three repair rounds, so every one of those tasks failed. Reporting was correct and useless.",
+      "observed_evidence": "Baseline over 20 tasks: pass@1 0.30 (6/20). Lint findings: combinational_uses_edge 39, undeclared_clock_signal 9, identity_expression 1. The failing code was `always @(posedge a or posedge b) begin out <= a & b; end` for a two-input AND gate.",
+      "rule": "Two shapes are repairable mechanically because the contract decides them. (1) With no clock port in the interface the design is combinational by definition, so an edge sensitivity on a data input is wrong and becomes `@(*)` with blocking assignment. (2) A signal assigned inside an always block must be a variable, so `output wire` becomes `output reg`. A contract that declares a clock is returned untouched, and port names, directions, widths, order and every expression are preserved.",
+      "enforced_by": ["agent/rtl_lint.py: rewrite_combinational", "agent/rtl_lint.py: declare_procedural_outputs", "agent/controller.py: applied before compiling each attempt"],
+      "measured_effect": "pass@1 0.30 -> 0.75 over the same 20 tasks; lint findings 39 -> 1; lint false positives 0 throughout",
+      "validated_on": 20,
+      "status": "effective"
+    },
+    {
+      "id": "remaining-failures-are-semantic",
+      "title": "After the mechanical repairs, what is left is model comprehension, not code shape",
+      "source_failure": "Five tasks still fail over 20. None of them is a shape the contract can decide.",
+      "observed_evidence": "Prob006_vectorr produced `out = ~in` where the task asks for a bit-order reversal, which is a misreading rather than a malformed module. Prob008_m2014_q4h produced `out = in` where the task asks for a logic gate. Prob016_m2014_q4j wrote logic that is wrong and additionally used an `initial` block on a combinatorial signal. Prob017_mux2to1v wrote `always @(*) begin ... end else begin ...`, a dangling else that does not parse.",
+      "rule": "Recorded as a model-capability boundary. The right next step is a larger model on the AMD machine, not more mechanical rewriting, because these defects require understanding the task rather than normalising its syntax.",
       "enforced_by": [],
-      "measured_effect": "1 of 5 tasks still failed on this pattern",
-      "validated_on": 5,
+      "measured_effect": "5 of 20 tasks; the failure types are now classified (dangling_else, procedural_assignment_to_wire) so the repair prompt receives a precise category",
+      "validated_on": 20,
       "status": "open-limitation"
     }
   ],
-  "measurement_note": "All pass@1 figures are 1 sample per task over the same first 5 VerilogEval tasks (Prob001..Prob005), seed base 1, temperature 0.2, on CPU. 5 tasks is too few to be a performance claim; the figures are evidence that each rule changed behaviour, not a reported benchmark. Re-measure on the full 156-task set on the AMD machine."
+  "measurement_note": "The 5-task figures are 1 sample per task over Prob001..Prob005. The 20-task figures are 1 sample per task over the VerilogEval set in filename order, seed base 1, temperature 0.2, on CPU with qwen2.5-coder:1.5b. Twenty tasks is still far too few to be a performance claim, and the model is deliberately small because this machine has no discrete GPU. The figures are evidence that each rule changed behaviour, not a reported benchmark. Re-measure on the full 156-task set with the 7B+ model on the AMD machine."
 }
