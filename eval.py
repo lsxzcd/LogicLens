@@ -51,6 +51,22 @@ def main() -> int:
     # anything saying so, and the gain would then be meaningless.
     client = client_from_args(args)
 
+    # Preflight, because a dead endpoint does not fail this command - it records
+    # every task as a failure in about 0.0 seconds and writes a summary that looks
+    # like a bad result rather than a broken run. That happened once: the local
+    # server had stopped between two runs and twenty baseline tasks were reported
+    # as 0.0 s failures with an empty error_types, which reads like the baseline
+    # being poor rather than the service being down.
+    if not args.mock:
+        report = client.probe()
+        if not report.get("ok"):
+            print(f"model endpoint is not usable: {report.get('error')}")
+            print(f"  endpoint: {report.get('endpoint')}")
+            print("refusing to start a batch run that would record every task as a failure")
+            print("start the inference service, or pass --mock for a software-only check")
+            return 2
+        print(f"model endpoint OK ({report.get('elapsed_seconds')}s, model={report.get('model')})")
+
     def build(mode: str) -> EvalConfig:
         return EvalConfig(
             project_root=root,
