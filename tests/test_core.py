@@ -63,6 +63,33 @@ class ErrorClassifierTests(unittest.TestCase):
         patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
         self.assertEqual(classify_error("WARNING: unconstrained path remains", patterns), "timing")
 
+    def test_a_dangling_else_is_its_own_category(self) -> None:
+        """Real log from Prob017, where the model wrote `end` before `else`.
+
+        The `syntax` category also lists "used in incorrect context", so this only
+        classifies correctly while `dangling_else` is checked first. The order of
+        the keys in error_patterns.json is therefore load-bearing.
+        """
+        patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
+        log = (
+            "ERROR: [VRFC 10-4982] syntax error near 'else' [TopModule.v:10]\n"
+            "ERROR: [VRFC 10-8549] SystemVerilog keyword 'else' used in incorrect context [TopModule.v:10]"
+        )
+        self.assertEqual(classify_error(log, patterns, stage="compile"), "dangling_else")
+
+    def test_a_wire_driven_procedurally_is_its_own_category(self) -> None:
+        """Real log from Prob006, which the classifier previously called unknown."""
+        patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
+        log = (
+            "ERROR: [VRFC 10-1280] procedural assignment to a non-register out is not permitted, "
+            "left-hand side should be reg/integer/time/genvar [TopModule.v:6]"
+        )
+        self.assertEqual(classify_error(log, patterns, stage="compile"), "procedural_assignment_to_wire")
+
+    def test_a_plain_syntax_error_still_classifies_as_syntax(self) -> None:
+        patterns = json.loads((Path(__file__).parents[1] / "skill" / "error_patterns.json").read_text(encoding="utf-8"))
+        self.assertEqual(classify_error("ERROR: syntax error near ';'", patterns, stage="compile"), "syntax")
+
 
 class StageAwareClassificationTests(unittest.TestCase):
     """A failure must be classified from the stage that failed.

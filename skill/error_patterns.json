@@ -1,4 +1,13 @@
 {
+  "dangling_else": [
+    "syntax error near 'else'",
+    "keyword 'else' used in incorrect context",
+    "'else' used in incorrect context"
+  ],
+  "procedural_assignment_to_wire": [
+    "procedural assignment to a non-register",
+    "left-hand side should be reg"
+  ],
   "syntax": [
     "syntax error",
     "unexpected token",
@@ -6,7 +15,8 @@
     "invalid module item",
     "near \"endmodule\"",
     "is not declared",
-    "undeclared identifier"
+    "undeclared identifier",
+    "used in incorrect context"
   ],
   "width_mismatch": [
     "width mismatch",
