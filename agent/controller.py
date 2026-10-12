@@ -9,7 +9,7 @@ from .candidate_ranker import score_result, synthesis_credit
 from .error_classifier import classify_error, failed_stage, load_patterns
 from .model_client import ModelClient, extract_verilog
 from .repair_policy import NON_REPAIRABLE, build_generation_prompt, build_repair_prompt
-from .rtl_lint import lint, render_findings
+from .rtl_lint import lint, render_findings, rewrite_combinational
 from .task_parser import parse_task
 from .testbench import resolve_reference_answer, resolve_testbench
 from .vivado_runner import run_vivado_flow
@@ -86,13 +86,27 @@ class LogicLensAgent:
             attempt_dir = run_dir / f"attempt_{attempt}"
             attempt_dir.mkdir(parents=True, exist_ok=True)
             rtl_path = attempt_dir / f"{dut_module}.v"
+
+            # Repair the one shape that is decidable from the contract alone:
+            # an edge-triggered always block in a task whose interface has no
+            # clock. Measured over 39 attempts, the linter reported this
+            # correctly and the model still produced it on every repair round, so
+            # reporting alone does not fix it. The rewrite is mechanical - with
+            # no clock port the design is combinational by definition - and a
+            # contract that declares a clock is returned untouched.
+            repaired = rewrite_combinational(current_code, contract)
+            rewrite_applied = repaired != current_code
+            if rewrite_applied:
+                current_code = repaired
+
             rtl_path.write_text(current_code, encoding="utf-8")
             shutil.copyfile(question_path, attempt_dir / "question.txt")
 
             # Structural checks run before any tool is invoked, so a candidate
             # with a fatal shape is not sent through compilation and
             # simulation just to discover it. Findings also give the next
-            # attempt a concrete, named defect to fix.
+            # attempt a concrete, named defect to fix. These are computed on the
+            # code that will actually be compiled, after the rewrite.
             findings = lint(current_code, contract)
             static_findings = render_findings(findings)
 
@@ -126,6 +140,7 @@ class LogicLensAgent:
                 "error_type": error_type,
                 "failed_stage": failed_stage(flow),
                 "lint_findings": [f.render() for f in findings],
+                "combinational_rewrite": rewrite_applied,
                 **flow,
             }
             history.append(record)
