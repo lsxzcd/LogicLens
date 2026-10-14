@@ -51,9 +51,13 @@ COPY vivado/           ./vivado/
 COPY tools/            ./tools/
 COPY tests/            ./tests/
 COPY experiments/*.py  ./experiments/
+COPY experiments/dataset_smoke/ ./experiments/dataset_smoke/
+COPY data/             ./data/
 COPY model/            ./model/
 COPY run.py run.sh run_baseline.py run_baseline.sh eval.py requirements.txt ./
 COPY README.md REPORT.md CONTRIBUTING.md ./
+# Travels with the image because the layout test asserts it is present.
+COPY Dockerfile Dockerfile.bundled .dockerignore ./
 
 RUN chmod +x serve/start.sh serve/fetch-model.sh serve/entrypoint.sh run.sh run_baseline.sh
 

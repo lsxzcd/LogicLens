@@ -1,4 +1,4 @@
-# LogicLens submission container
+﻿# LogicLens submission container
 #
 # The topic guide requires the submission to be a container built on the
 # organiser's base image, running in an offline sandbox and doing the whole
@@ -72,9 +72,18 @@ COPY vivado/           ./vivado/
 COPY tools/            ./tools/
 COPY tests/            ./tests/
 COPY experiments/*.py  ./experiments/
+# The smoke dataset and the bundled counter example are read unconditionally by
+# the unit suite, so a container that omits them fails its own self-check for a
+# reason that has nothing to do with the design under test.
+COPY experiments/dataset_smoke/ ./experiments/dataset_smoke/
+COPY data/             ./data/
 COPY model/            ./model/
 COPY run.py run.sh run_baseline.py run_baseline.sh eval.py requirements.txt ./
 COPY README.md REPORT.md CONTRIBUTING.md ./
+# The layout test asserts these are present, so they have to travel with the
+# image. Copying a Dockerfile is unusual but deliberate here: the check that the
+# submission has the shape the guide prescribes runs inside the container.
+COPY Dockerfile Dockerfile.bundled .dockerignore ./
 
 # Fix the mode of the shell entry points. Git on Windows cannot record the
 # executable bit, so a checkout on that platform lands as 0644 and the container

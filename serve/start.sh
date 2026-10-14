@@ -19,9 +19,17 @@ BINARY="${OLLAMA_BINARY:-ollama}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --model) MODEL="$2"; shift 2 ;;
-        --host) HOST="$1"; shift 2 ;;
-        --binary) BINARY="$2"; shift 2 ;;
+        --model)
+            [ $# -ge 2 ] || { echo "--model needs a value" >&2; exit 2; }
+            MODEL="$2"; shift 2 ;;
+        --host)
+            # Was "$1", which is the literal flag, so passing --host silently set
+            # the hostname to the string "--host". A missing value now fails.
+            [ $# -ge 2 ] || { echo "--host needs a value" >&2; exit 2; }
+            HOST="$2"; shift 2 ;;
+        --binary)
+            [ $# -ge 2 ] || { echo "--binary needs a value" >&2; exit 2; }
+            BINARY="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
