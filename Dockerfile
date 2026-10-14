@@ -72,9 +72,18 @@ COPY vivado/           ./vivado/
 COPY tools/            ./tools/
 COPY tests/            ./tests/
 COPY experiments/*.py  ./experiments/
+# The smoke dataset and the bundled counter example are read unconditionally by
+# the unit suite, so a container that omits them fails its own self-check for a
+# reason that has nothing to do with the design under test.
+COPY experiments/dataset_smoke/ ./experiments/dataset_smoke/
+COPY data/             ./data/
 COPY model/            ./model/
 COPY run.py run.sh run_baseline.py run_baseline.sh eval.py requirements.txt ./
 COPY README.md REPORT.md CONTRIBUTING.md ./
+# The layout test asserts these are present, so they have to travel with the
+# image. Copying a Dockerfile is unusual but deliberate here: the check that the
+# submission has the shape the guide prescribes runs inside the container.
+COPY Dockerfile Dockerfile.bundled .dockerignore ./
 
 # Fix the mode of the shell entry points. Git on Windows cannot record the
 # executable bit, so a checkout on that platform lands as 0644 and the container
@@ -92,12 +101,21 @@ RUN mkdir -p /models
 
 # By default the weights arrive on a mounted volume, so the image ships without
 # them and start.sh verifies their presence before the agent runs.
+#
+# LOGICLENS_SEED and OLLAMA_CONTEXT_LENGTH are part of the declared
+# configuration rather than conveniences. The gain comparison is only valid if
+# the agent and the baseline ran the same context length, and a context length
+# also changes the memory footprint, so leaving it to the server's default means
+# the reported numbers depend on a setting nobody recorded. A teammate's review
+# of this file caught that omission.
 ENV OLLAMA_MODELS=/models \
+    OLLAMA_CONTEXT_LENGTH=8192 \
     LOGICLENS_MODEL_NAME=${MODEL_NAME} \
     LOGICLENS_MODEL_URL=http://127.0.0.1:11434/v1 \
     LOGICLENS_TEMPERATURE=0.2 \
     LOGICLENS_TOP_P=0.95 \
     LOGICLENS_MAX_TOKENS=2048 \
+    LOGICLENS_SEED=1 \
     LOGICLENS_TIMEOUT=300 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
