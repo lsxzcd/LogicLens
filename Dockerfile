@@ -1,4 +1,4 @@
-﻿# LogicLens submission container
+# LogicLens submission container
 #
 # The topic guide requires the submission to be a container built on the
 # organiser's base image, running in an offline sandbox and doing the whole
@@ -101,12 +101,21 @@ RUN mkdir -p /models
 
 # By default the weights arrive on a mounted volume, so the image ships without
 # them and start.sh verifies their presence before the agent runs.
+#
+# LOGICLENS_SEED and OLLAMA_CONTEXT_LENGTH are part of the declared
+# configuration rather than conveniences. The gain comparison is only valid if
+# the agent and the baseline ran the same context length, and a context length
+# also changes the memory footprint, so leaving it to the server's default means
+# the reported numbers depend on a setting nobody recorded. A teammate's review
+# of this file caught that omission.
 ENV OLLAMA_MODELS=/models \
+    OLLAMA_CONTEXT_LENGTH=8192 \
     LOGICLENS_MODEL_NAME=${MODEL_NAME} \
     LOGICLENS_MODEL_URL=http://127.0.0.1:11434/v1 \
     LOGICLENS_TEMPERATURE=0.2 \
     LOGICLENS_TOP_P=0.95 \
     LOGICLENS_MAX_TOKENS=2048 \
+    LOGICLENS_SEED=1 \
     LOGICLENS_TIMEOUT=300 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

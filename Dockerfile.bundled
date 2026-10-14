@@ -65,12 +65,18 @@ RUN chmod +x serve/start.sh serve/fetch-model.sh serve/entrypoint.sh run.sh run_
 # .dockerignore explicitly re-includes it for this file's sake.
 COPY model-weights/ /models/
 
+# LOGICLENS_SEED and OLLAMA_CONTEXT_LENGTH are part of the declared
+# configuration: the gain comparison requires the agent and the baseline to have
+# run the same context length, and a context length also changes the memory
+# footprint. See the note in Dockerfile.
 ENV OLLAMA_MODELS=/models \
+    OLLAMA_CONTEXT_LENGTH=8192 \
     LOGICLENS_MODEL_NAME=${MODEL_NAME} \
     LOGICLENS_MODEL_URL=http://127.0.0.1:11434/v1 \
     LOGICLENS_TEMPERATURE=0.2 \
     LOGICLENS_TOP_P=0.95 \
     LOGICLENS_MAX_TOKENS=2048 \
+    LOGICLENS_SEED=1 \
     LOGICLENS_TIMEOUT=300 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
