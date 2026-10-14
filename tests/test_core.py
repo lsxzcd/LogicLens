@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import unittest
@@ -34,6 +35,23 @@ from agent.testbench import (
     resolve_testbench,
 )
 from agent.vivado_runner import locate_vitis, locate_vivado, run_vivado_flow, vivado_candidates
+
+_DOCKERFILE_COPY_RE = re.compile(r"^COPY\s+(.+?)\s+\S+\s*$", re.M | re.I)
+
+
+def _dockerfile_copy_sources(path: Path) -> set[str]:
+    """The set of build-context paths a Dockerfile copies.
+
+    Only the source side is needed, and each source is normalised without its
+    trailing slash so a directory copy and a file copy compare the same way.
+    """
+    sources: set[str] = set()
+    for line in _DOCKERFILE_COPY_RE.findall(path.read_text(encoding="utf-8")):
+        for token in line.split():
+            if token.startswith("--"):
+                continue  # a flag such as --from=0 is not a context path
+            sources.add(token.rstrip("/"))
+    return sources
 
 
 class TaskParserTests(unittest.TestCase):
@@ -1204,6 +1222,60 @@ class FairnessTests(unittest.TestCase):
         config = EvalConfig(project_root=Path("."), model_client=sentinel)
         self.assertIs(config.client(), sentinel)
         self.assertIs(config.client(), config.client())
+
+    def test_the_container_copies_everything_its_own_tests_read(self) -> None:
+        """A layout test inside the container needs the files it asserts about.
+
+        The unit suite's SubmissionLayoutTests requires Dockerfile,
+        Dockerfile.bundled and .dockerignore to be present, and other tests read
+        data/examples/counter and experiments/dataset_smoke unconditionally. None
+        of those was copied, so the container failed its own self-check for a
+        reason unrelated to the design under test. A file-layout projection of the
+        COPY set reported 3 failures and 4 errors, which is how this was found.
+        """
+        root = Path(__file__).resolve().parents[1]
+        needed = [
+            "Dockerfile",
+            "Dockerfile.bundled",
+            ".dockerignore",
+            "agent",
+            "skill",
+            "serve",
+            "tests",
+            "model",
+            "run.sh",
+            "REPORT.md",
+            "data/examples/counter/question.txt",
+            "experiments/dataset_smoke",
+        ]
+        for dockerfile in ("Dockerfile", "Dockerfile.bundled"):
+            with self.subTest(dockerfile=dockerfile):
+                sources = _dockerfile_copy_sources(root / dockerfile)
+                for item in needed:
+                    covered = any(
+                        item == src or item.startswith(src + "/") or item.split("/")[0] == src
+                        for src in sources
+                    )
+                    # A glob such as `experiments/*.py` covers only its own depth,
+                    # so the explicit directory copies are what satisfy these.
+                    self.assertTrue(
+                        covered,
+                        f"{dockerfile} does not copy {item}, which the unit suite reads",
+                    )
+
+    def test_start_sh_reads_the_option_value_not_the_flag(self) -> None:
+        """`--host) HOST="$1"` set the hostname to the literal string "--host".
+
+        A shell test would be better, but bash is not available on this machine,
+        so the argument parsing is checked as text. The point is that the value
+        comes from $2 after a shift, not from $1 which is the flag itself.
+        """
+        script = (Path(__file__).resolve().parents[1] / "serve" / "start.sh").read_text(encoding="utf-8")
+        self.assertNotIn('HOST="$1"', script, "the flag is being used as the value")
+        for option in ("--model", "--host", "--binary"):
+            with self.subTest(option=option):
+                self.assertIn(f"{option})", script)
+        self.assertIn("[ $# -ge 2 ]", script, "a missing value should be an error, not a silent shift")
 
     def test_both_entry_points_use_the_shared_model_arguments(self) -> None:
         # The options are defined once in agent/cli.py; this fails if either
