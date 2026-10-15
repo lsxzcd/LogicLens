@@ -11,7 +11,13 @@ from pathlib import Path
 from agent.candidate_ranker import score_result, synthesis_credit
 from agent.cli import COMPARABLE_KEYS, compare_configurations
 from agent.error_classifier import classify_error, failed_stage, stage_log
-from agent.evaluation import EvalConfig, discover_tasks, pass_at_k, summarize
+from agent.evaluation import (
+    EvalConfig,
+    _row,
+    discover_tasks,
+    pass_at_k,
+    summarize,
+)
 from agent.model_client import (
     ModelClient,
     ModelConfigError,
@@ -1364,6 +1370,88 @@ class FairnessTests(unittest.TestCase):
             samples=1,
         )
         self.assertIn("pass@1", summary)
+
+
+class AttemptAccountingTests(unittest.TestCase):
+    """The CSV must not conflate the kept candidate with the final round.
+
+    A teammate reviewing the lab logs found two columns doing exactly that: one
+    spelled `attempts` held the round number of the kept candidate, and
+    `error_type` came from the last round that reported an error. Neither is wrong
+    on its own, but together they describe a repair loop that fixed a problem and
+    then introduced another as though it had never been fixed. Prob100 is the real
+    case: the best candidate came from round 1 while the recorded error came from
+    a later round's syntax error.
+    """
+
+    def _row_for(self, **result) -> dict:
+        task = type("T", (), {"task_id": "t"})()
+        return _row(task, "agent", 1, result)
+
+    def test_the_kept_candidate_and_the_last_round_are_reported_separately(self) -> None:
+        row = self._row_for(
+            best_attempt=1,
+            history=[
+                {"attempt": 1, "error_type": "simulation_mismatch"},
+                {"attempt": 2, "error_type": "syntax"},
+                {"attempt": 3, "error_type": "syntax"},
+            ],
+        )
+        self.assertEqual(row["best_attempt"], 1)
+        self.assertEqual(row["best_error"], "simulation_mismatch", "the kept candidate's error")
+        self.assertEqual(row["last_error"], "syntax", "the final round's error")
+        self.assertEqual(row["attempt_count"], 3)
+
+    def test_a_column_named_attempts_does_not_claim_only_one_round_ran(self) -> None:
+        row = self._row_for(
+            best_attempt=2,
+            history=[
+                {"attempt": 1, "error_type": "compile"},
+                {"attempt": 2, "error_type": "none"},
+            ],
+        )
+        self.assertEqual(row["attempt_count"], 2)
+        self.assertEqual(row["attempts"], 2, "the alias must not read as a count of one")
+
+    def test_a_result_predating_best_attempt_falls_back_to_the_last_round(self) -> None:
+        row = self._row_for(history=[{"attempt": 1, "error_type": "compile"}])
+        self.assertEqual(row["best_attempt"], 1)
+        self.assertEqual(row["best_error"], "compile")
+
+    def test_wall_clock_is_not_the_tool_time(self) -> None:
+        row = self._row_for(elapsed_seconds=12.5, wall_clock_seconds=91.0, history=[])
+        self.assertEqual(row["elapsed_seconds"], 12.5)
+        self.assertEqual(row["wall_clock_seconds"], 91.0)
+
+    def test_the_summary_reports_tool_time_and_wall_clock_separately(self) -> None:
+        rows = [
+            {
+                "task_id": "a",
+                "success": 1,
+                "compile_pass": 1,
+                "elaborate_pass": 1,
+                "simulation_pass": 1,
+                "synthesis_pass": 1,
+                "synthesis_attempted": 1,
+                "sim_crashed": 0,
+                "elapsed_seconds": 10.0,
+                "wall_clock_seconds": 60.0,
+                "attempt_count": 2,
+                "error_type": "",
+                "best_error": "",
+            }
+        ]
+        summary = summarize(rows, samples=1)
+        self.assertEqual(summary["total_tool_seconds"], 10.0)
+        self.assertEqual(summary["total_wall_clock_seconds"], 60.0)
+        self.assertEqual(summary["attempt_counts"], {"2": 1})
+
+    def test_the_summary_tolerates_a_row_without_the_new_fields(self) -> None:
+        """`summarize` is a public helper; a caller may not supply every column."""
+        rows = [{"task_id": "a", "success": 1, "compile_pass": 1}]
+        summary = summarize(rows, samples=1)
+        self.assertEqual(summary["tasks"], 1)
+        self.assertIn("total_wall_clock_seconds", summary)
 
 
 class BaselinePromptTests(unittest.TestCase):
