@@ -11,7 +11,13 @@ from pathlib import Path
 from agent.candidate_ranker import score_result, synthesis_credit
 from agent.cli import COMPARABLE_KEYS, compare_configurations
 from agent.error_classifier import classify_error, failed_stage, stage_log
-from agent.evaluation import EvalConfig, discover_tasks, pass_at_k, summarize
+from agent.evaluation import (
+    EvalConfig,
+    _row,
+    discover_tasks,
+    pass_at_k,
+    summarize,
+)
 from agent.model_client import (
     ModelClient,
     ModelConfigError,
@@ -34,7 +40,13 @@ from agent.testbench import (
     detect_verilogeval_pass_criterion,
     resolve_testbench,
 )
-from agent.vivado_runner import locate_vitis, locate_vivado, run_vivado_flow, vivado_candidates
+from agent.vivado_runner import (
+    _failure,
+    locate_vitis,
+    locate_vivado,
+    run_vivado_flow,
+    vivado_candidates,
+)
 
 _DOCKERFILE_COPY_RE = re.compile(r"^COPY\s+(.+?)\s+\S+\s*$", re.M | re.I)
 
@@ -1360,6 +1372,88 @@ class FairnessTests(unittest.TestCase):
         self.assertIn("pass@1", summary)
 
 
+class AttemptAccountingTests(unittest.TestCase):
+    """The CSV must not conflate the kept candidate with the final round.
+
+    A teammate reviewing the lab logs found two columns doing exactly that: one
+    spelled `attempts` held the round number of the kept candidate, and
+    `error_type` came from the last round that reported an error. Neither is wrong
+    on its own, but together they describe a repair loop that fixed a problem and
+    then introduced another as though it had never been fixed. Prob100 is the real
+    case: the best candidate came from round 1 while the recorded error came from
+    a later round's syntax error.
+    """
+
+    def _row_for(self, **result) -> dict:
+        task = type("T", (), {"task_id": "t"})()
+        return _row(task, "agent", 1, result)
+
+    def test_the_kept_candidate_and_the_last_round_are_reported_separately(self) -> None:
+        row = self._row_for(
+            best_attempt=1,
+            history=[
+                {"attempt": 1, "error_type": "simulation_mismatch"},
+                {"attempt": 2, "error_type": "syntax"},
+                {"attempt": 3, "error_type": "syntax"},
+            ],
+        )
+        self.assertEqual(row["best_attempt"], 1)
+        self.assertEqual(row["best_error"], "simulation_mismatch", "the kept candidate's error")
+        self.assertEqual(row["last_error"], "syntax", "the final round's error")
+        self.assertEqual(row["attempt_count"], 3)
+
+    def test_a_column_named_attempts_does_not_claim_only_one_round_ran(self) -> None:
+        row = self._row_for(
+            best_attempt=2,
+            history=[
+                {"attempt": 1, "error_type": "compile"},
+                {"attempt": 2, "error_type": "none"},
+            ],
+        )
+        self.assertEqual(row["attempt_count"], 2)
+        self.assertEqual(row["attempts"], 2, "the alias must not read as a count of one")
+
+    def test_a_result_predating_best_attempt_falls_back_to_the_last_round(self) -> None:
+        row = self._row_for(history=[{"attempt": 1, "error_type": "compile"}])
+        self.assertEqual(row["best_attempt"], 1)
+        self.assertEqual(row["best_error"], "compile")
+
+    def test_wall_clock_is_not_the_tool_time(self) -> None:
+        row = self._row_for(elapsed_seconds=12.5, wall_clock_seconds=91.0, history=[])
+        self.assertEqual(row["elapsed_seconds"], 12.5)
+        self.assertEqual(row["wall_clock_seconds"], 91.0)
+
+    def test_the_summary_reports_tool_time_and_wall_clock_separately(self) -> None:
+        rows = [
+            {
+                "task_id": "a",
+                "success": 1,
+                "compile_pass": 1,
+                "elaborate_pass": 1,
+                "simulation_pass": 1,
+                "synthesis_pass": 1,
+                "synthesis_attempted": 1,
+                "sim_crashed": 0,
+                "elapsed_seconds": 10.0,
+                "wall_clock_seconds": 60.0,
+                "attempt_count": 2,
+                "error_type": "",
+                "best_error": "",
+            }
+        ]
+        summary = summarize(rows, samples=1)
+        self.assertEqual(summary["total_tool_seconds"], 10.0)
+        self.assertEqual(summary["total_wall_clock_seconds"], 60.0)
+        self.assertEqual(summary["attempt_counts"], {"2": 1})
+
+    def test_the_summary_tolerates_a_row_without_the_new_fields(self) -> None:
+        """`summarize` is a public helper; a caller may not supply every column."""
+        rows = [{"task_id": "a", "success": 1, "compile_pass": 1}]
+        summary = summarize(rows, samples=1)
+        self.assertEqual(summary["tasks"], 1)
+        self.assertIn("total_wall_clock_seconds", summary)
+
+
 class BaselinePromptTests(unittest.TestCase):
     """The gain baseline must carry the question and nothing else."""
 
@@ -1414,6 +1508,77 @@ class MockFlowTests(unittest.TestCase):
         )
         self.assertTrue(result["synthesis_pass"])
         self.assertTrue((nested / "flow_result.json").is_file())
+
+
+class ToolCrashAttributionTests(unittest.TestCase):
+    """A tool crash must not erase the stages the design already reached.
+
+    Measured on the lab machine: synth_design aborts the process with
+    STATUS_HEAP_CORRUPTION (0xC0000374). Because the Tcl only wrote its verdict
+    after synthesis, two tasks whose simulation had genuinely printed
+    "Mismatches: 0" were reported with every stage false and an error type of
+    unknown - which reads as a broken design rather than a broken tool. That
+    corrupted the attribution for exactly the tasks that had succeeded.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1] / "experiments" / "runs" / "_unittest_crash_attribution"
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def test_a_crashed_run_keeps_the_stages_it_reached(self) -> None:
+        run_dir = self.root / "partial"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "flow_result.json").write_text(
+            json.dumps(
+                {
+                    "compile_pass": True,
+                    "elaborate_pass": True,
+                    "simulation_pass": True,
+                    "sim_crashed": False,
+                    "sim_mismatches": "0",
+                    "synthesis_attempted": True,
+                    "synthesis_pass": False,
+                    "timing_constraint_pass": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = json.loads((run_dir / "flow_result.json").read_text(encoding="utf-8"))
+        # What the runner now does for a crashed process: keep the stages, and
+        # only synthesis cannot have succeeded.
+        result["synthesis_pass"] = False
+        self.assertTrue(result["compile_pass"])
+        self.assertTrue(result["elaborate_pass"])
+        self.assertTrue(result["simulation_pass"], "a passing simulation must survive a synthesis crash")
+        self.assertEqual(result["sim_mismatches"], "0")
+        self.assertFalse(result["synthesis_pass"])
+
+    def test_the_tcl_writes_the_verdict_after_each_stage(self) -> None:
+        """The file has to exist before synthesis starts, not only after it.
+
+        Without this a crash leaves no file at all, the runner falls back to a
+        cleared verdict, and every stage is lost.
+        """
+        tcl = (Path(__file__).resolve().parents[1] / "vivado" / "run_flow.tcl").read_text(encoding="utf-8")
+        writes = tcl.count("flow_result.json] [flow_result_json]")
+        self.assertGreaterEqual(writes, 3, f"expected a write per stage, found {writes}")
+        self.assertIn("proc flow_result_json", tcl)
+        # The write that matters most is the one before synth_design is invoked.
+        synthesis_at = tcl.index("synth_design -top")
+        self.assertIn(
+            "flow_result.json] [flow_result_json]",
+            tcl[:synthesis_at],
+            "synthesis is not preceded by a verdict write",
+        )
+
+    def test_no_evidence_at_all_still_clears_every_stage(self) -> None:
+        """With no recorded evidence the conservative verdict is the honest one."""
+        result = _failure("Vivado produced no flow_result.json", "vivado", 1.0)
+        self.assertTrue(result["_no_result"])
+        for stage in ("compile_pass", "elaborate_pass", "simulation_pass"):
+            with self.subTest(stage=stage):
+                self.assertFalse(result[stage])
 
 
 class ReferenceAnswerTests(unittest.TestCase):

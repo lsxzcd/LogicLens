@@ -118,6 +118,12 @@ def run_baseline(
             "notes": spec.notes,
         },
         "elapsed_seconds": round(time.perf_counter() - started, 3),
+        # For the baseline the two are the same: one generation and one tool flow,
+        # with no repair loop, so the figure above already covers the whole task.
+        # The name is kept consistent with the agent's result so a reader does not
+        # have to know that.
+        "wall_clock_seconds": round(time.perf_counter() - started, 3),
+        "attempt_count": 1,
         **flow,
     }
     (run_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

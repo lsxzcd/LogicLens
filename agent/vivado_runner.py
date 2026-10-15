@@ -80,6 +80,13 @@ def locate_vitis(explicit: str | None = None) -> str | None:
 
 
 def _failure(reason: str, tool: str, elapsed: float, log: str = "") -> dict:
+    """The verdict when no stage evidence exists at all.
+
+    `_no_result` marks that nothing was recorded, which is what tells the caller
+    whether the cleared stages below are the only truthful answer or whether a
+    partial record should be preserved instead. It is stripped before the result
+    is returned.
+    """
     return {
         "compile_pass": False,
         "elaborate_pass": False,
@@ -91,6 +98,7 @@ def _failure(reason: str, tool: str, elapsed: float, log: str = "") -> dict:
         "tool": tool,
         "elapsed_seconds": elapsed,
         "log": log or reason,
+        "_no_result": True,
     }
 
 
@@ -196,19 +204,38 @@ def run_vivado_flow(
     else:
         result = _failure("Vivado produced no flow_result.json", vivado_bin, elapsed, combined_log[-10000:])
 
-    if timed_out:
-        result.update(
-            {
-                "compile_pass": False,
-                "elaborate_pass": False,
-                "simulation_pass": False,
-                "sim_crashed": False,
-                "synthesis_attempted": False,
-                "synthesis_pass": False,
-                "timing_constraint_pass": False,
-                "timed_out": True,
-            }
-        )
+    # A timeout or a tool crash says nothing about the design, so the stages that
+    # already passed are kept and the failure is recorded alongside them. Clearing
+    # them would discard real evidence: on the lab machine synth_design aborts the
+    # process, and two tasks whose simulation had reported zero mismatches were
+    # being reported with every stage false and an error type of unknown, which
+    # reads as a broken design rather than a broken tool.
+    #
+    # A non-zero return code with no result file at all still clears the stages,
+    # because in that case nothing was ever recorded to preserve.
+    tool_failed = timed_out or (returncode not in (0, None))
+    if tool_failed:
+        result["timed_out"] = bool(timed_out)
+        if returncode is not None:
+            result["process_crashed"] = True
+        if result.get("_no_result"):
+            # No stage evidence exists, so the conservative cleared verdict stands.
+            result.update(
+                {
+                    "compile_pass": False,
+                    "elaborate_pass": False,
+                    "simulation_pass": False,
+                    "sim_crashed": False,
+                    "synthesis_attempted": False,
+                    "synthesis_pass": False,
+                    "timing_constraint_pass": False,
+                }
+            )
+        else:
+            # Keep what was reached. Synthesis cannot have succeeded if the
+            # process died before writing its final verdict.
+            result["synthesis_pass"] = False
+    result.pop("_no_result", None)
 
     stage_logs = []
     for name in ("compile.log", "elaboration.log", "simulation.log", "synthesis.log"):

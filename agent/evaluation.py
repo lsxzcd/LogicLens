@@ -36,8 +36,15 @@ RESULT_FIELDS = (
     "synthesis_pass",
     "timing_constraint_pass",
     "sim_crashed",
+    # Attempt bookkeeping, stated separately because the kept candidate and the
+    # last round are different facts.
+    "best_attempt",
+    "attempt_count",
+    "best_error",
+    "last_error",
     "attempts",
     "elapsed_seconds",
+    "wall_clock_seconds",
     "error_type",
     "testbench_source",
     "testbench_behavior",
@@ -132,8 +139,40 @@ def _run_once(config: EvalConfig, task: Task, sample: int) -> dict:
 
 
 def _row(task: Task, mode: str, sample: int, result: dict) -> dict:
+    """One CSV row, with the attempt bookkeeping stated honestly.
+
+    A previous version had a single column spelled `attempts` whose value was
+    actually `best_attempt`, and an `error_type` taken from the last attempt that
+    reported an error rather than from the attempt that was selected. A teammate
+    reviewing the lab logs caught both: the best candidate can come from an early
+    round, so its error type and the last round's error are different facts, and a
+    column named `attempts` that holds a round number invites the reader to
+    conclude the repair loop only ran once. The columns are now:
+
+    * `best_attempt` - which round produced the candidate that was kept;
+    * `attempt_count` - how many rounds actually ran;
+    * `best_error` - the error type of the kept candidate (empty when it passed);
+    * `last_error` - the error type of the final round;
+    * `attempts` - retained as an alias of `best_attempt` for older summaries.
+    """
     history = result.get("history") or []
-    last_error = next((h.get("error_type") for h in reversed(history) if h.get("error_type") not in (None, "none")), "")
+    best_attempt = result.get("best_attempt")
+    if not best_attempt and history:
+        # A result written before this field existed: fall back to the last round.
+        best_attempt = history[-1].get("attempt")
+
+    best_error = ""
+    for record in history:
+        if record.get("attempt") == best_attempt:
+            best_error = record.get("error_type") or ""
+            break
+
+    last_error = ""
+    if history:
+        last_error = history[-1].get("error_type") or ""
+
+    attempted = len(history)
+    best_round = best_attempt or attempted
     testbench = result.get("testbench") or {}
     return {
         "task_id": task.task_id,
@@ -147,9 +186,17 @@ def _row(task: Task, mode: str, sample: int, result: dict) -> dict:
         "synthesis_pass": int(bool(result.get("synthesis_pass"))),
         "timing_constraint_pass": int(bool(result.get("timing_constraint_pass"))),
         "sim_crashed": int(bool(result.get("sim_crashed"))),
-        "attempts": result.get("best_attempt") or len(history),
+        "best_attempt": best_round,
+        "attempt_count": attempted,
+        "best_error": best_error,
+        "last_error": last_error,
+        # Kept so an older summary or downstream reader still resolves.
+        "attempts": best_round,
+        # The tool time of the kept attempt. Model calls are outside it.
         "elapsed_seconds": result.get("elapsed_seconds", 0.0),
-        "error_type": last_error,
+        # The whole task, model calls included. Quote this as wall clock.
+        "wall_clock_seconds": result.get("wall_clock_seconds", result.get("elapsed_seconds", 0.0)),
+        "error_type": best_error or last_error,
         "testbench_source": testbench.get("source", ""),
         "testbench_behavior": testbench.get("behavior", ""),
     }
@@ -185,9 +232,13 @@ def summarize(rows: list[dict], samples: int) -> dict:
 
     tasks = len(by_task)
     per_stage = {
-        stage: (sum(row[stage] for row in rows) / len(rows) if rows else 0.0)
+        stage: (sum(row.get(stage, 0) for row in rows) / len(rows) if rows else 0.0)
         for stage in ("compile_pass", "elaborate_pass", "simulation_pass", "synthesis_pass")
     }
+
+    def total(key: str) -> float:
+        return sum(row.get(key, row.get("elapsed_seconds", 0.0)) for row in rows)
+
     summary = {
         "tasks": tasks,
         "runs": len(rows),
@@ -196,24 +247,47 @@ def summarize(rows: list[dict], samples: int) -> dict:
         "elaborate_pass_rate": round(per_stage["elaborate_pass"], 4),
         "simulation_pass_rate": round(per_stage["simulation_pass"], 4),
         "synthesis_pass_rate": round(per_stage["synthesis_pass"], 4),
-        "success_rate": round(sum(row["success"] for row in rows) / len(rows), 4) if rows else 0.0,
+        "success_rate": round(sum(row.get("success", 0) for row in rows) / len(rows), 4) if rows else 0.0,
         "task_success_rate": round(
-            sum(1 for outcomes in by_task.values() if any(r["success"] for r in outcomes)) / tasks, 4
+            sum(1 for outcomes in by_task.values() if any(r.get("success") for r in outcomes)) / tasks, 4
         )
         if tasks
         else 0.0,
-        "sim_crash_runs": sum(row["sim_crashed"] for row in rows),
-        "synthesis_skipped_runs": sum(1 for row in rows if not row["synthesis_attempted"]),
-        "total_elapsed_seconds": round(sum(row["elapsed_seconds"] for row in rows), 1),
-        "mean_elapsed_seconds": round(sum(row["elapsed_seconds"] for row in rows) / len(rows), 2) if rows else 0.0,
+        "sim_crash_runs": sum(row.get("sim_crashed", 0) for row in rows),
+        "synthesis_skipped_runs": sum(1 for row in rows if not row.get("synthesis_attempted")),
+        # Tool time only: the sum of the verification flows that were run. It
+        # excludes model generation, so it is not the experiment's duration.
+        "total_tool_seconds": round(total("elapsed_seconds"), 1),
+        "mean_tool_seconds": round(total("elapsed_seconds") / len(rows), 2) if rows else 0.0,
+        # The whole run, model calls included. This is the figure to quote.
+        "total_wall_clock_seconds": round(total("wall_clock_seconds"), 1),
+        "mean_wall_clock_seconds": round(total("wall_clock_seconds") / len(rows), 2) if rows else 0.0,
+        "attempt_counts": {},
         "error_types": {},
+        "best_error_types": {},
     }
+    # `elapsed_seconds` used to be reported as the experiment's duration when it
+    # was only the tool time. Kept as an alias so an older reader still resolves,
+    # but the honest fields above are what a report should quote.
+    summary["total_elapsed_seconds"] = summary["total_tool_seconds"]
+    summary["mean_elapsed_seconds"] = summary["mean_tool_seconds"]
     for k in range(1, samples + 1):
-        values = [pass_at_k([bool(r["success"]) for r in outcomes], k, samples) for outcomes in by_task.values()]
+        values = [
+            pass_at_k([bool(r.get("success")) for r in outcomes], k, samples) for outcomes in by_task.values()
+        ]
         summary[f"pass@{k}"] = round(sum(values) / len(values), 4) if values else 0.0
     for row in rows:
-        if row["error_type"]:
-            summary["error_types"][row["error_type"]] = summary["error_types"].get(row["error_type"], 0) + 1
+        count = row.get("attempt_count", 0)
+        summary["attempt_counts"][str(count)] = summary["attempt_counts"].get(str(count), 0) + 1
+        kind = row.get("error_type") or ""
+        if kind:
+            summary["error_types"][kind] = summary["error_types"].get(kind, 0) + 1
+        # Recorded separately because the kept candidate and the final round can
+        # carry different errors: a repair may fix one problem and introduce
+        # another, and only the kept candidate's error describes the outcome.
+        best = row.get("best_error") or ""
+        if best:
+            summary["best_error_types"][best] = summary["best_error_types"].get(best, 0) + 1
     return summary
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,7 @@ class LogicLensAgent:
         return self.project_root / "experiments" / "runs" / f"agent_{stamp}"
 
     def run(self, question_path: Path, run_dir: Path | None = None, source: str = "agent") -> dict:
+        run_started = time.perf_counter()
         run_dir = run_dir or self._run_dir()
         run_dir.mkdir(parents=True, exist_ok=True)
         question = question_path.read_text(encoding="utf-8")
@@ -203,6 +205,7 @@ class LogicLensAgent:
                 "notes": spec.notes,
             },
             "best_attempt": best.get("attempt"),
+            "attempt_count": len(history),
             "stopped_early": stopped_reason,
             "compile_pass": best.get("compile_pass", False),
             "elaborate_pass": best.get("elaborate_pass", False),
@@ -211,7 +214,13 @@ class LogicLensAgent:
             "synthesis_attempted": best.get("synthesis_attempted", False),
             "synthesis_pass": best.get("synthesis_pass", False),
             "timing_constraint_pass": best.get("timing_constraint_pass", False),
+            # The tool time of the attempt that was kept. Not the wall clock of
+            # the task: model calls, testbench resolution and structural checks are
+            # all outside it, so it must not be reported as the task's duration.
             "elapsed_seconds": best.get("elapsed_seconds", 0.0),
+            # The whole task, model calls included. This is the figure to quote as
+            # wall clock.
+            "wall_clock_seconds": round(time.perf_counter() - run_started, 3),
             "history": history,
         }
         (run_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
