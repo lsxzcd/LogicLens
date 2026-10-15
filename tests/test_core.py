@@ -34,7 +34,13 @@ from agent.testbench import (
     detect_verilogeval_pass_criterion,
     resolve_testbench,
 )
-from agent.vivado_runner import locate_vitis, locate_vivado, run_vivado_flow, vivado_candidates
+from agent.vivado_runner import (
+    _failure,
+    locate_vitis,
+    locate_vivado,
+    run_vivado_flow,
+    vivado_candidates,
+)
 
 _DOCKERFILE_COPY_RE = re.compile(r"^COPY\s+(.+?)\s+\S+\s*$", re.M | re.I)
 
@@ -1414,6 +1420,77 @@ class MockFlowTests(unittest.TestCase):
         )
         self.assertTrue(result["synthesis_pass"])
         self.assertTrue((nested / "flow_result.json").is_file())
+
+
+class ToolCrashAttributionTests(unittest.TestCase):
+    """A tool crash must not erase the stages the design already reached.
+
+    Measured on the lab machine: synth_design aborts the process with
+    STATUS_HEAP_CORRUPTION (0xC0000374). Because the Tcl only wrote its verdict
+    after synthesis, two tasks whose simulation had genuinely printed
+    "Mismatches: 0" were reported with every stage false and an error type of
+    unknown - which reads as a broken design rather than a broken tool. That
+    corrupted the attribution for exactly the tasks that had succeeded.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1] / "experiments" / "runs" / "_unittest_crash_attribution"
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def test_a_crashed_run_keeps_the_stages_it_reached(self) -> None:
+        run_dir = self.root / "partial"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "flow_result.json").write_text(
+            json.dumps(
+                {
+                    "compile_pass": True,
+                    "elaborate_pass": True,
+                    "simulation_pass": True,
+                    "sim_crashed": False,
+                    "sim_mismatches": "0",
+                    "synthesis_attempted": True,
+                    "synthesis_pass": False,
+                    "timing_constraint_pass": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = json.loads((run_dir / "flow_result.json").read_text(encoding="utf-8"))
+        # What the runner now does for a crashed process: keep the stages, and
+        # only synthesis cannot have succeeded.
+        result["synthesis_pass"] = False
+        self.assertTrue(result["compile_pass"])
+        self.assertTrue(result["elaborate_pass"])
+        self.assertTrue(result["simulation_pass"], "a passing simulation must survive a synthesis crash")
+        self.assertEqual(result["sim_mismatches"], "0")
+        self.assertFalse(result["synthesis_pass"])
+
+    def test_the_tcl_writes_the_verdict_after_each_stage(self) -> None:
+        """The file has to exist before synthesis starts, not only after it.
+
+        Without this a crash leaves no file at all, the runner falls back to a
+        cleared verdict, and every stage is lost.
+        """
+        tcl = (Path(__file__).resolve().parents[1] / "vivado" / "run_flow.tcl").read_text(encoding="utf-8")
+        writes = tcl.count("flow_result.json] [flow_result_json]")
+        self.assertGreaterEqual(writes, 3, f"expected a write per stage, found {writes}")
+        self.assertIn("proc flow_result_json", tcl)
+        # The write that matters most is the one before synth_design is invoked.
+        synthesis_at = tcl.index("synth_design -top")
+        self.assertIn(
+            "flow_result.json] [flow_result_json]",
+            tcl[:synthesis_at],
+            "synthesis is not preceded by a verdict write",
+        )
+
+    def test_no_evidence_at_all_still_clears_every_stage(self) -> None:
+        """With no recorded evidence the conservative verdict is the honest one."""
+        result = _failure("Vivado produced no flow_result.json", "vivado", 1.0)
+        self.assertTrue(result["_no_result"])
+        for stage in ("compile_pass", "elaborate_pass", "simulation_pass"):
+            with self.subTest(stage=stage):
+                self.assertFalse(result[stage])
 
 
 class ReferenceAnswerTests(unittest.TestCase):

@@ -54,6 +54,12 @@ proc append_log {name content} {
     close $fd
 }
 
+# Render the verdict as JSON. Kept as a procedure so the same text can be written
+# after every stage; see the note above the final write for why.
+proc flow_result_json {} {
+    return "{\n  \"compile_pass\": $::compile_pass,\n  \"elaborate_pass\": $::elaborate_pass,\n  \"simulation_pass\": $::simulation_pass,\n  \"sim_crashed\": $::sim_crashed,\n  \"sim_mismatches\": \"$::sim_mismatches\",\n  \"synthesis_attempted\": $::synthesis_attempted,\n  \"synthesis_pass\": $::synthesis_pass,\n  \"synthesis_error\": \"$::synthesis_error\",\n  \"timing_constraint_pass\": $::timing_constraint_pass,\n  \"clock_port\": \"$::clk_port\",\n  \"relax_compile\": $::relax_compile,\n  \"compile_units\": $::compile_units_json,\n  \"target_part\": \"$::target_part\",\n  \"clock_period_ns\": 5.0,\n  \"timing_constraint_file\": \"logiclens_clock.xdc\",\n  \"tool\": \"vivado\"\n}"
+}
+
 # Collapse all whitespace runs into single spaces so port detection can rely on
 # plain substring tests instead of regexes with shell-hostile quoting.
 proc normalize_ws {text} {
@@ -145,6 +151,8 @@ if {[catch {set compile_log [exec xvlog {*}$xvlog_args {*}$compile_units 2>@1]} 
 }
 append_log [file join $run_dir compile.log] $compile_log
 append_log [file join $run_dir compile.pass] $compile_pass
+# Persist the verdict so far; see the note above the final write.
+append_log [file join $run_dir flow_result.json] [flow_result_json]
 
 set sim_log ""
 if {$compile_pass} {
@@ -193,6 +201,7 @@ if {$compile_pass} {
 }
 append_log [file join $run_dir simulation.log] $sim_log
 append_log [file join $run_dir simulation.pass] $simulation_pass
+append_log [file join $run_dir flow_result.json] [flow_result_json]
 
 # Progressive grading: the competition only advances to the next level when
 # the previous level passed. Synthesis is therefore gated on simulation, and
@@ -203,6 +212,11 @@ set synth_log ""
 set synthesis_attempted 0
 if {$compile_pass && $simulation_pass} {
     set synthesis_attempted 1
+    # Record that synthesis was entered before it starts. If synth_design takes
+    # the process down, the file on disk still says a netlist was attempted,
+    # which is what distinguishes "not run" from "ran and crashed".
+    set compile_units_json [json_string_array $compile_units]
+    append_log [file join $run_dir flow_result.json] [flow_result_json]
     if {[catch {
         read_verilog -sv $rtl_path
         if {$xdc_path ne ""} {
@@ -237,6 +251,18 @@ append_log [file join $run_dir synthesis.log] $synth_log
 append_log [file join $run_dir synthesis.pass] $synthesis_pass
 
 set compile_units_json [json_string_array $compile_units]
-set summary "{\n  \"compile_pass\": $compile_pass,\n  \"elaborate_pass\": $elaborate_pass,\n  \"simulation_pass\": $simulation_pass,\n  \"sim_crashed\": $sim_crashed,\n  \"sim_mismatches\": \"$sim_mismatches\",\n  \"synthesis_attempted\": $synthesis_attempted,\n  \"synthesis_pass\": $synthesis_pass,\n  \"synthesis_error\": \"$synthesis_error\",\n  \"timing_constraint_pass\": $timing_constraint_pass,\n  \"clock_port\": \"$clk_port\",\n  \"relax_compile\": $relax_compile,\n  \"compile_units\": $compile_units_json,\n  \"target_part\": \"$target_part\",\n  \"clock_period_ns\": 5.0,\n  \"timing_constraint_file\": \"logiclens_clock.xdc\",\n  \"tool\": \"vivado\"\n}"
+
+# Final write. The verdict has already been written after each stage, so if the
+# process dies mid-synthesis the last file on disk still records what passed up to
+# that point. The comment below explains why that matters.
+#
+# This used to be the only write, so a crash anywhere earlier lost the record of
+# everything that had already passed. It mattered: on the lab machine
+# synth_design aborts the process with STATUS_HEAP_CORRUPTION, and two tasks whose
+# simulation had genuinely reported "Mismatches: 0" were then reported with every
+# stage false and an error type of unknown, because the runner found no result
+# file and fell back to a cleared verdict. A tool crash is not the design's fault
+# and must not erase what the design already demonstrated.
+set summary [flow_result_json]
 append_log [file join $run_dir flow_result.json] $summary
 exit 0
